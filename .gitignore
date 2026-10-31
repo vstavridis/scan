@@ -1,0 +1,31 @@
+# Μυστικά και τοπικές ρυθμίσεις
+.env
+*.key
+
+# Δεδομένα παραγωγής: βάση, Excel, backups, logs
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.xlsx
+*.xlsm
+*.xls
+!tests/fixtures/*.py
+tests/fixtures/local/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.streamlit/secrets.toml
+
+# Λειτουργικό σύστημα / IDE
+.DS_Store
+Thumbs.db
+~$*
+.idea/
+.vscode/

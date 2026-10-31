@@ -1,0 +1,2 @@
+start_windows.bat text eol=crlf
+*.py text eol=lf

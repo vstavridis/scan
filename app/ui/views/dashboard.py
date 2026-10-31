@@ -1,0 +1,235 @@
+"""Γραμματεία / Dashboard — ζωντανή εικόνα ενεργών barcode, SUM κιλών, μεταφορές."""
+from __future__ import annotations
+
+import time
+from decimal import Decimal
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
+from app.services.normalize import format_kilos, normalize_text
+from app.timeutil import fmt_local
+from app.ui.api_client import ApiError
+from app.ui.common import client, handle_api_error, require
+
+PAGE_SIZE = 40
+
+
+def _matches(item: dict[str, Any], term: str) -> bool:
+    if not term:
+        return True
+    t = normalize_text(term)
+    hay = " ".join(str(item.get(k) or "") for k in ("barcode", "eidos", "pelatis", "diastaseis"))
+    return t in normalize_text(hay) or term.strip().upper() in hay.upper()
+
+
+FLASH_SECONDS = 20
+
+
+def _flash(kind: str, msg: str) -> None:
+    st.session_state.setdefault("dash_msgs", []).append((kind, msg, time.time()))
+
+
+def _show_flash() -> None:
+    """Τα μηνύματα μένουν ορατά για λίγο, παρά την αυτόματη ανανέωση κάθε δευτερόλεπτο."""
+    now = time.time()
+    msgs = [m for m in st.session_state.get("dash_msgs", []) if now - m[2] < FLASH_SECONDS]
+    st.session_state["dash_msgs"] = msgs
+    for kind, msg, _ts in msgs:
+        getattr(st, kind)(msg)
+
+
+def _do(action: str, item: dict[str, Any], **payload: Any) -> None:
+    api = client()
+    try:
+        if action == "transfer":
+            with st.spinner(f"Μεταφορά {item['barcode']} στο Excel…"):
+                res = api.post(f"/api/items/{item['id']}/transfer", timeout=120)
+            msg = (f"✔ Το {res['barcode']} μεταφέρθηκε στα Σβησμένα "
+                   f"(γραμμή {res['source_row']} → γραμμή {res['target_row']}).")
+            _flash("success", msg)
+            if res.get("warning"):
+                _flash("warning", "⚠ " + res["warning"])
+        elif action == "remove":
+            api.post(f"/api/items/{item['id']}/remove", json={"reason": payload.get("reason", "")})
+            _flash("info", f"Το {item['barcode']} αφαιρέθηκε από την ενεργή λίστα (καταγράφηκε στο ιστορικό).")
+        elif action == "resolve":
+            api.post(f"/api/items/{item['id']}/resolve", json={"product_record_id": payload["product_record_id"]})
+            _flash("success", f"Ορίστηκε η γραμμή Excel {payload.get('sheet_row')} για το {item['barcode']}.")
+    except ApiError as exc:
+        if exc.status == 401:
+            handle_api_error(exc)
+        else:
+            _flash("error", f"✖ {item['barcode']}: {exc.message}")
+    st.session_state.pop("confirm", None)
+
+
+def _confirm_box() -> None:
+    conf = st.session_state.get("confirm")
+    if not conf:
+        return
+    action, item = conf["action"], conf["item"]
+    with st.container(border=True):
+        if action == "transfer":
+            st.warning(
+                f"**Επιβεβαίωση μεταφοράς**  \n**{item['barcode']}** — {item.get('display') or ''}  \n"
+                "Η γραμμή θα αντιγραφεί στο φύλλο «Σβησμένα» και θα αφαιρεθεί από τα «Έτοιμα προϊόντα». "
+                "Πριν την αλλαγή δημιουργείται αντίγραφο ασφαλείας."
+            )
+            label = "✔ Ναι, μεταφορά στα Σβησμένα"
+        else:
+            st.warning(f"**Αφαίρεση από την ενεργή λίστα:** {item['barcode']}  \n(Το Excel δεν αλλάζει.)")
+            label = "✔ Ναι, αφαίρεση"
+        c1, c2, _ = st.columns([2, 1, 3])
+        if c1.button(label, type="primary", key=f"yes-{action}-{item['id']}"):
+            _do(action, item)
+            st.rerun(scope="fragment")
+        if c2.button("Άκυρο", key=f"no-{action}-{item['id']}"):
+            st.session_state.pop("confirm", None)
+            st.rerun(scope="fragment")
+
+
+def _metrics(totals: dict[str, Any]) -> None:
+    c = st.columns(5)
+    c[0].metric("Ενεργά barcode", totals["active_barcodes"])
+    c[1].metric("Συνολικά κιλά", totals["total_kilos_display"])
+    c[2].metric("Ομάδες προϊόντων", totals["groups"])
+    c[3].metric("Διπλά σκαναρίσματα", totals["duplicate_scans"])
+    c[4].metric("Άγνωστα / αμφίσημα", f"{totals['unknown']} / {totals['ambiguous']}")
+
+
+def _groups_tab(groups: list[dict[str, Any]], items_by_id: dict[int, dict[str, Any]], term: str) -> None:
+    if term:
+        groups = [g for g in groups if any(_matches(items_by_id[b["id"]], term) for b in g["barcodes"])]
+    if not groups:
+        st.info("Δεν υπάρχουν ενεργά προϊόντα για ομαδοποίηση.")
+        return
+    df = pd.DataFrame([
+        {"Προϊόν": g["product"], "Συνολικά κιλά": format_kilos(g["total"]), "Πελάτης": g["pelatis"], "Τεμ. barcode": g["count"]}
+        for g in groups
+    ])
+    st.dataframe(df, hide_index=True, use_container_width=True,
+                 column_config={"Συνολικά κιλά": st.column_config.TextColumn(width="small")})
+    total = sum((Decimal(g["total"]) for g in groups), Decimal(0))
+    st.markdown(f"<div class='total-line'>Γενικό σύνολο: {format_kilos(total)} κιλά</div>", unsafe_allow_html=True)
+    st.caption("Ανάπτυξη ομάδας για τα barcode που τη συνθέτουν:")
+    for g in groups:
+        missing = f" · ⚠ {g['missing_kilos']} χωρίς κιλά" if g["missing_kilos"] else ""
+        with st.expander(f"{g['product']}  —  {g['pelatis']}  —  {g['total_display']} κιλά  ({g['count']}){missing}"):
+            st.dataframe(pd.DataFrame([{"Barcode": b["barcode"], "Κιλά": format_kilos(b["kila"])} for b in g["barcodes"]]),
+                         hide_index=True, use_container_width=True)
+
+
+def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
+    rows = [i for i in items if _matches(i, term)]
+    if not rows:
+        st.info("Δεν υπάρχουν εγγραφές.")
+        return
+    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = st.number_input("Σελίδα", 1, pages, 1, key="dash_page") if pages > 1 else 1
+    chunk = rows[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    widths = [1.15, 1.6, 0.6, 1.1, 0.65, 1.3, 1.1, 2.1, 0.45]
+    hdr = st.columns(widths)
+    for col, label in zip(hdr, ["Barcode", "Είδος", "Πάχος", "Διαστάσεις", "Κιλά", "Πελάτης", "Κατάσταση", "Ενέργεια", ""]):
+        col.markdown(f"<div class='hdr'>{label}</div>", unsafe_allow_html=True)
+    busy = bool(st.session_state.get("confirm"))
+    for it in chunk:
+        c = st.columns(widths)
+        badge = f"<span class='badge b-{it['state']}'>{it['state_label']}</span>"
+        if it.get("duplicate_count"):
+            badge += f" <span class='badge b-dup'>διπλό ×{it['duplicate_count']}</span>"
+        c[0].markdown(f"<div class='row-cell mono'>{it['barcode']}</div>", unsafe_allow_html=True)
+        c[1].markdown(f"<div class='row-cell'>{it.get('eidos') or '—'}</div>", unsafe_allow_html=True)
+        c[2].markdown(f"<div class='row-cell'>{it.get('paxos') or ''}</div>", unsafe_allow_html=True)
+        c[3].markdown(f"<div class='row-cell'>{it.get('diastaseis') or ''}</div>", unsafe_allow_html=True)
+        c[4].markdown(f"<div class='row-cell'>{format_kilos(it.get('kila')) if it['state']=='ok' else ''}</div>", unsafe_allow_html=True)
+        c[5].markdown(f"<div class='row-cell'>{it.get('pelatis') or ''}</div>", unsafe_allow_html=True)
+        c[6].markdown(f"<div class='row-cell'>{badge}</div>", unsafe_allow_html=True)
+        if it["state"] == "ok":
+            if c[7].button("Μεταφορά στα Σβησμένα", key=f"tr-{it['id']}", disabled=busy, use_container_width=True):
+                st.session_state["confirm"] = {"action": "transfer", "item": it}
+                st.rerun(scope="fragment")
+        else:
+            c[7].markdown("<div class='row-cell'>Έλεγχος ⟶ «Προς έλεγχο»</div>", unsafe_allow_html=True)
+        if c[8].button("✕", key=f"rm-{it['id']}", help="Αφαίρεση από την ενεργή λίστα", disabled=busy):
+            st.session_state["confirm"] = {"action": "remove", "item": it}
+            st.rerun(scope="fragment")
+
+
+def _review_tab(items: list[dict[str, Any]]) -> None:
+    review = [i for i in items if i["state"] != "ok"]
+    if not review:
+        st.success("Δεν υπάρχουν barcode προς έλεγχο.")
+        return
+    api = client()
+    for it in review:
+        with st.container(border=True):
+            st.markdown(f"<span class='mono'>{it['barcode']}</span> &nbsp; "
+                        f"<span class='badge b-{it['state']}'>{it['state_label']}</span> &nbsp; "
+                        f"<small>σκαναρίστηκε {fmt_local(it['created_at'])}</small>", unsafe_allow_html=True)
+            if it.get("message"):
+                st.caption(it["message"])
+            if it["state"] == "ambiguous":
+                cache = st.session_state.setdefault("cands", {})
+                cands = cache.get(it["id"])
+                if cands is None:
+                    try:
+                        cands = cache[it["id"]] = api.get(f"/api/items/{it['id']}/candidates")
+                    except ApiError as exc:
+                        st.error(exc.message)
+                        cands = []
+                st.write("Πιθανές αντιστοιχίσεις στο Excel — επιλέξτε τη σωστή γραμμή:")
+                for cnd in cands:
+                    c = st.columns([0.8, 4, 1.6])
+                    c[0].markdown(f"<div class='row-cell'>Γραμμή {cnd['sheet_row']}</div>", unsafe_allow_html=True)
+                    c[1].markdown(
+                        f"<div class='row-cell'>{cnd['eidos']} × {cnd['paxos']} × {cnd['diastaseis']} / "
+                        f"<b>{format_kilos(cnd['kila'])}</b> κιλά - {cnd['pelatis']} · τεμ. {cnd['temaxia']} · "
+                        f"{cnd['topothesia']} · ρολό {cnd['rolo']}</div>", unsafe_allow_html=True)
+                    if c[2].button("Επιλογή αυτής", key=f"res-{it['id']}-{cnd['id']}"):
+                        _do("resolve", it, product_record_id=cnd["id"], sheet_row=cnd["sheet_row"])
+                        st.rerun(scope="fragment")
+            if st.button("Αφαίρεση από τη λίστα", key=f"rmr-{it['id']}"):
+                st.session_state["confirm"] = {"action": "remove", "item": it}
+                st.rerun(scope="fragment")
+
+
+def page() -> None:
+    if not require("dashboard"):
+        return
+    st.title("Γραμματεία — Ζωντανή εικόνα")
+    term = st.text_input("🔎 Αναζήτηση (barcode, είδος ή πελάτης)", key="dash_search", placeholder="π.χ. VS114 ή ΑΠΟΘΗΚΗ")
+    refresh = st.session_state.get("dash_refresh", 1.0)
+
+    @st.fragment(run_every=refresh)
+    def live() -> None:
+        try:
+            data = client().get("/api/dashboard", timeout=10)
+        except ApiError as exc:
+            handle_api_error(exc)
+            return
+        imp = data.get("import")
+        if imp is None:
+            st.error("Δεν υπάρχει ενεργό Excel. Ο διαχειριστής πρέπει να ανεβάσει αρχείο από τις Ρυθμίσεις.")
+        else:
+            st.caption(f"Ενεργό Excel: **{imp['original_filename']}** · εισαγωγή #{imp['id']} · "
+                       f"{fmt_local(imp['imported_at'])} · αυτόματη ανανέωση κάθε {refresh:g} δευτ.")
+        _show_flash()
+        _confirm_box()
+        _metrics(data["totals"])
+        items = data["items"]
+        items_by_id = {i["id"]: i for i in items}
+        tab_sum, tab_list, tab_review = st.tabs(["Συγκεντρωτικά (SUM)", "Αναλυτική λίστα", "Προς έλεγχο"])
+        with tab_sum:
+            _groups_tab(data["groups"], items_by_id, term)
+        with tab_list:
+            _detail_tab(items, term)
+        with tab_review:
+            n = data["totals"]["problem"]
+            if n:
+                st.error(f"{n} barcode χρειάζονται έλεγχο (αμφίσημα ή άγνωστα).")
+            _review_tab(items)
+
+    live()
+
