@@ -163,7 +163,8 @@ def test_fullscreen_button_uses_fullscreen_api(browser, live_server, synthetic_m
     ctx, page = _open_scanner(browser, live_server.url)
     page.click("#btn-fs")
     page.wait_for_function("!!document.fullscreenElement", timeout=5000)
-    assert page.evaluate("document.body.classList.contains('fs')")
+    # το layout αλλάζει στο event fullscreenchange, που φτάνει λίγο μετά
+    page.wait_for_function("document.body.classList.contains('fs')", timeout=5000)
     assert not page.is_visible("#btn-fs")          # στο fullscreen κρύβονται τα κουμπιά
     assert page.is_visible("#conn") and page.is_visible("#c-ok")
     page.evaluate("document.exitFullscreen()")
