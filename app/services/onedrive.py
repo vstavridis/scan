@@ -525,7 +525,15 @@ def inspect_pending() -> dict:
         latest = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
         token = _access_token()
         online, meta = _stable_download(b["drive_id"], b["item_id"], token)
-        result = compare_workbook_cells(baseline, online)
+        try:
+            result = compare_workbook_cells(baseline, online)
+        except Exception as exc:
+            # Never let malformed or unsupported XLSX structure take down Settings.
+            # The original workbooks remain intact and no upload is attempted.
+            log.warning("OneDrive read-only XLSX comparison failed: %s", type(exc).__name__)
+            raise ServiceError("Δεν ολοκληρώθηκε η σύγκριση των Excel. "
+                               "Τα αρχεία παραμένουν αμετάβλητα. Ελέγξτε ότι το "
+                               "OneDrive αρχείο ανοίγει σωστά ως .xlsx.") from None
         result.update({
             "original_version": synced_version,
             "updated_version": current_version,
