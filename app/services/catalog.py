@@ -103,7 +103,13 @@ def count_active_items(conn: Conn) -> int:
     return int(conn.execute("SELECT COUNT(*) AS n FROM active_items WHERE status='active'").fetchone()["n"])
 
 
-def activate(staging_id: str, actor: str, confirm_replace: bool = False) -> dict[str, Any]:
+def activate(staging_id: str, actor: str, confirm_replace: bool = False, *,
+             onedrive_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Activate a workbook. If OneDrive is supplied, bind it in the SAME DB transaction.
+
+    A committed import can never be left without its OneDrive binding, even if the
+    Streamlit session is interrupted before it receives an acknowledgement.
+    """
     if not _STAGING_ID_RE.match(staging_id or ""):
         raise ServiceError("Μη έγκυρο αναγνωριστικό αρχείου.")
     with connect() as conn:
@@ -173,6 +179,16 @@ def activate(staging_id: str, actor: str, confirm_replace: bool = False) -> dict
                 ],
             )
             remapped = _remap_active_items(conn, import_id)
+            if onedrive_binding is not None:
+                # Atomic with the active import pointer, product records and staged deletion.
+                # No Microsoft token or secret is stored in this binding (only drive/item ids).
+                binding = dict(onedrive_binding)
+                binding["import_id"] = import_id
+                conn.execute(
+                    "INSERT INTO app_settings(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("onedrive.bound", json.dumps(binding, ensure_ascii=False)),
+                )
             conn.execute("DELETE FROM staged_uploads WHERE id=?", (staging_id,))
             backups = [previous["working_object"]] if previous else []
             audit(conn, actor, "import.activate", {
