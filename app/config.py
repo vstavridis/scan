@@ -63,6 +63,9 @@ class Settings:
     supabase_service_key: str | None = None
     supabase_bucket: str | None = None
     dev_storage_dir: Path | None = None
+    onedrive_client_id: str | None = None
+    onedrive_client_secret: str | None = None
+    onedrive_redirect_uri: str | None = None
     # λοιπά
     timezone: str = "Europe/Athens"
     source_sheet: str = DEFAULT_SOURCE_SHEET
@@ -97,6 +100,9 @@ def load_settings() -> Settings:
         supabase_service_key=_get(sec, "supabase", "service_key", "APP_SUPABASE_SERVICE_KEY"),
         supabase_bucket=_get(sec, "supabase", "bucket", "APP_SUPABASE_BUCKET"),
         dev_storage_dir=Path(storage_dir) if storage_dir else None,
+        onedrive_client_id=_get(sec, "onedrive", "client_id", "APP_ONEDRIVE_CLIENT_ID"),
+        onedrive_client_secret=_get(sec, "onedrive", "client_secret", "APP_ONEDRIVE_CLIENT_SECRET"),
+        onedrive_redirect_uri=_get(sec, "onedrive", "redirect_uri", "APP_ONEDRIVE_REDIRECT_URI"),
         timezone=_get(sec, "app", "timezone", "APP_TIMEZONE", "Europe/Athens"),
         source_sheet=_get(sec, "app", "source_sheet", "APP_SOURCE_SHEET", DEFAULT_SOURCE_SHEET),
         target_sheet=_get(sec, "app", "target_sheet", "APP_TARGET_SHEET", DEFAULT_TARGET_SHEET),
