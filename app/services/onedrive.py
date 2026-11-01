@@ -241,19 +241,57 @@ def status() -> dict:
 
 
 def activate_staged(stage: dict, actor: str, confirm_replace: bool = False) -> dict:
-    from app.services.errors import ConfirmationRequired
+    """Commit catalog and OneDrive binding atomically, with recovery for older partial activations."""
     current = status()
     if current["pending"]:
-        raise Conflict("Υπάρχει μεταφορά που δεν έχει συγχρονιστεί στο OneDrive. Επιλύστε την πρώτα.")
+        raise Conflict("Υπάρχει εκκρεμής μεταφορά στο OneDrive. Κάντε πρώτα συγχρονισμό.")
     token = _access_token()
     meta = file_metadata(stage["drive_id"], stage["item_id"], token)
     if meta.get("eTag") != stage["etag"]:
-        raise Conflict("Το αρχείο άλλαξε στο OneDrive μετά τον έλεγχο. Πατήστε ξανά «Έλεγχος OneDrive Excel».")
-    res = catalog.activate(stage["staged"]["staging_id"], actor, confirm_replace)
-    obj = {"import_id": res["import_id"], "drive_id": stage["drive_id"], "item_id": stage["item_id"],
-           "etag": stage["etag"], "synced_version": 1, "link": stage["link"], "name": stage["name"]}
-    _put(BOUND_KEY, json.dumps(obj, ensure_ascii=False))
-    return res
+        raise Conflict("Το online Excel άλλαξε μετά τον έλεγχο. Πατήστε ξανά «Έλεγχος Excel από OneDrive».")
+
+    staged = stage["staged"]
+    stage_id = staged["staging_id"]
+    with connect() as conn:
+        exists = conn.execute("SELECT id FROM staged_uploads WHERE id=?", (stage_id,)).fetchone()
+
+    if not exists:
+        # Recovery for old releases: catalog.activate() may already have committed and
+        # deleted staging before OneDrive binding was saved. Never create a new import
+        # or bind a different file without verifying SHA-256 against both copies.
+        active = catalog.active_import()
+        b = binding()
+        if (active and int(active["working_version"]) == 1
+                and active["working_sha256"] == stage["sha256"]
+                and active["original_sha256"] == stage["sha256"]
+                and active["original_filename"] == stage["name"]
+                and not (b and int(b["import_id"]) == int(active["id"]))):
+            remote, latest = _stable_download(stage["drive_id"], stage["item_id"], token)
+            if latest.get("eTag") != stage["etag"] or sha256_bytes(remote) != stage["sha256"]:
+                raise Conflict("Το OneDrive έχει αλλάξει. Ξανακάντε έλεγχο αντί για σύνδεση παλιάς έκδοσης.")
+            # Before binding ensure the active version really exists in safe storage.
+            cached_get(active["working_object"], active["working_sha256"])
+            obj = {"import_id": active["id"], "drive_id": stage["drive_id"],
+                   "item_id": stage["item_id"], "etag": stage["etag"],
+                   "synced_version": 1, "link": stage["link"], "name": stage["name"]}
+            with lease(catalog.EXCEL_LOCK):
+                with transaction() as conn:
+                    a = conn.execute("SELECT id,working_sha256,working_version FROM excel_imports "
+                                     "WHERE is_active=1").fetchone()
+                    if not a or a["id"] != active["id"] or a["working_version"] != 1 or a["working_sha256"] != stage["sha256"]:
+                        raise Conflict("Το ενεργό Excel άλλαξε. Κάντε εκ νέου έλεγχο.")
+                    conn.execute("INSERT INTO app_settings(key,value) VALUES (?,?) "
+                                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                 (BOUND_KEY, json.dumps(obj, ensure_ascii=False)))
+            return {"import_id": active["id"], "filename": active["original_filename"], "recovered": True}
+        raise ServiceError("Η προηγούμενη προεπισκόπηση έληξε ή ενεργοποιήθηκε ήδη άλλο αρχείο. "
+                           "Πατήστε ξανά «Έλεγχος Excel από OneDrive».")
+
+    obj = {"drive_id": stage["drive_id"], "item_id": stage["item_id"],
+           "etag": stage["etag"], "synced_version": 1,
+           "link": stage["link"], "name": stage["name"]}
+    return catalog.activate(stage_id, actor, confirm_replace,
+                            onedrive_binding=obj)
 
 
 def assert_ready_for_transfer(imp: dict) -> None:
