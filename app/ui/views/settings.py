@@ -92,6 +92,63 @@ def _upload_section() -> None:
                 show_error(exc)
 
 
+def _onedrive_section() -> None:
+    from app.services import onedrive
+
+    st.subheader("OneDrive — online Excel")
+    if not onedrive.configured():
+        st.info("Προσθέστε [onedrive] client_id, client_secret, redirect_uri στα Streamlit Secrets.")
+        return
+    try:
+        state = onedrive.status()
+    except ServiceError as exc:
+        show_error(exc)
+        return
+    if not state["connected"]:
+        st.warning("Δεν έχει δοθεί ακόμη άδεια Microsoft.")
+        st.link_button("🔗 Σύνδεση Microsoft OneDrive", onedrive.authorization_url())
+        return
+    st.success("Συνδεδεμένο Microsoft OneDrive: " + state["connected"])
+    if state["bound"]:
+        st.write("Συνδεδεμένο αρχείο:", state["name"])
+        st.link_button("Άνοιγμα online Excel", state["link"])
+        if state["pending"]:
+            st.error("Το online αρχείο δεν έχει την τελευταία έκδοση — οι νέες μεταφορές μπλοκάρονται.")
+            if st.button("Επανάληψη συγχρονισμού OneDrive"):
+                try:
+                    onedrive.retry_sync()
+                    st.success("Το online Excel συγχρονίστηκε.")
+                    st.rerun()
+                except ServiceError as exc:
+                    show_error(exc)
+        else:
+            st.caption("Οι αλλαγές έχουν συγχρονιστεί. Εξωτερικές τροποποιήσεις ελέγχονται πριν από τη μεταφορά.")
+    st.caption("Δοκιμή προσωπικού OneDrive. Το ιστορικό και τα backups παραμένουν στο Supabase.")
+    url = st.text_input("Σύνδεσμος Excel από OneDrive", placeholder="https://1drv.ms/x/...", key="onedrive_share_url")
+    if st.button("Έλεγχος Excel από OneDrive", disabled=not url.strip()):
+        try:
+            with st.spinner("Διαβάζω το online Excel…"):
+                st.session_state["onedrive_stage"] = onedrive.stage_from_link(url, principal().actor)
+        except ServiceError as exc:
+            show_error(exc)
+    stage = st.session_state.get("onedrive_stage")
+    if not stage:
+        return
+    st.write("Προεπισκόπηση:", stage["name"])
+    _report(stage["staged"]["report"])
+    if not stage["staged"]["report"]["ok"]:
+        return
+    confirmed = st.checkbox("Επιβεβαιώνω την αντικατάσταση του ενεργού καταλόγου από το δοκιμαστικό OneDrive Excel.", key="onedrive_confirm")
+    if st.button("Ενεργοποίηση OneDrive Excel", disabled=not confirmed):
+        try:
+            res = onedrive.activate_staged(stage, principal().actor, confirm_replace=True)
+            st.session_state.pop("onedrive_stage", None)
+            st.success(f"Συνδέθηκε το Excel — εισαγωγή #{res['import_id']}.")
+            st.rerun()
+        except ServiceError as exc:
+            show_error(exc)
+
+
 def _downloads() -> None:
     st.subheader("Λήψεις και αντίγραφα ασφαλείας")
     p = principal()
@@ -193,6 +250,8 @@ def page() -> None:
             for hint in d.hints:
                 st.info(hint)
     _active_import_box(imports)
+    st.divider()
+    _onedrive_section()
     st.divider()
     _upload_section()
     st.divider()
