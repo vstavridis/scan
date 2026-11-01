@@ -364,6 +364,8 @@ def _upload(drive: str, item: str, expected_etag: str, data: bytes, token: str) 
         or host in {"1drv.com", "api.onedrive.com", "onedrive.com", "storage.live.com"}
         or host.endswith(".onedrive.com")
         or host.endswith(".sharepoint.com")
+        or host == "my.microsoftpersonalcontent.com"
+        or host.endswith(".microsoftpersonalcontent.com")
         or host.endswith(".storage.live.com")
     )
     try:
