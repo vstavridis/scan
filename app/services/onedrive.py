@@ -493,6 +493,50 @@ def sync_pending_under_lease() -> bool:
     return True
 
 
+
+def inspect_pending() -> dict:
+    """Read-only diagnostic comparing actual OneDrive workbook with pre-transfer backup.
+
+    No upload, no changes to the online workbook or to pending sync status.
+    Reads all worksheets, shows only a bounded number of cell-level differences.
+    """
+    from app.services.onedrive_diff import compare_workbook_cells
+
+    with lease(catalog.EXCEL_LOCK, busy_message="Εκτελείται άλλη ενέργεια Excel. Δοκιμάστε ξανά."):
+        imp = catalog.active_import()
+        if imp is None:
+            raise ServiceError("Δεν υπάρχει ενεργό Excel.")
+        b = bound_import(int(imp["id"]))
+        if b is None:
+            raise ServiceError("Δεν υπάρχει συνδεδεμένο OneDrive Excel.")
+        synced_version = int(b["synced_version"])
+        current_version = int(imp["working_version"])
+        if synced_version >= current_version:
+            raise ServiceError("Το OneDrive δεν εμφανίζεται ως εκκρεμές· δεν χρειάζεται σύγκριση.")
+        with connect() as conn:
+            prior = conn.execute(
+                "SELECT base_object, excel_before_sha256 FROM transfer_operations "
+                "WHERE import_id=? AND base_version=? AND status='completed' ORDER BY id LIMIT 1",
+                (int(imp["id"]), synced_version),
+            ).fetchone()
+        if not prior:
+            raise ServiceError("Δεν βρέθηκε το αντίγραφο Excel πριν από τη μεταφορά.")
+        baseline = cached_get(prior["base_object"], prior["excel_before_sha256"]).read_bytes()
+        latest = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
+        token = _access_token()
+        online, meta = _stable_download(b["drive_id"], b["item_id"], token)
+        result = compare_workbook_cells(baseline, online)
+        result.update({
+            "original_version": synced_version,
+            "updated_version": current_version,
+            "etag_changed": meta.get("eTag") != b["etag"],
+            "online_identical_before": sha256_bytes(online) == sha256_bytes(baseline),
+            "online_identical_after": sha256_bytes(online) == sha256_bytes(latest),
+            "online_bytes_different": sha256_bytes(online) != sha256_bytes(baseline),
+        })
+        return result
+
+
 def retry_sync() -> bool:
     with lease(catalog.EXCEL_LOCK, busy_message="Εκτελείται άλλη αλλαγή Excel. Δοκιμάστε ξανά."):
         return sync_pending_under_lease()
