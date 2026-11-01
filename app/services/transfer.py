@@ -78,6 +78,11 @@ def transfer_item(item_id: int, actor: str) -> dict[str, Any]:
         _check_item(conn, item_id)
     recover_pending()
     with lease(EXCEL_LOCK, seconds=LEASE_SECONDS):
+        from app.services import onedrive
+        with connect() as c:
+            current = c.execute("SELECT * FROM excel_imports WHERE is_active=1").fetchone()
+        if current:
+            onedrive.assert_ready_for_transfer(dict(current))
         # --- 3. έλεγχοι (ξανά, μέσα στο lease) + journal "started" -----------
         with transaction() as conn:
             it, imp, prod = _check_item(conn, item_id)
@@ -133,6 +138,18 @@ def transfer_item(item_id: int, actor: str) -> dict[str, Any]:
         finally:
             out.unlink(missing_ok=True)
 
+        onedrive_synced = True
+        onedrive_warning = None
+        if onedrive.bound_import(int(imp["id"])):
+            try:
+                onedrive.sync_pending_under_lease()
+            except Exception:
+                log.exception("OneDrive sync pending after committed transfer %s", op_id)
+                onedrive_synced = False
+                onedrive_warning = ("Η μεταφορά καταχωρίστηκε στο Supabase, αλλά το OneDrive δεν ενημερώθηκε. "
+                                    "Ρυθμίσεις → OneDrive → Επανάληψη συγχρονισμού. "
+                                    "Μην επαναλάβετε τη μεταφορά.")
+
     with connect() as conn:
         op = dict(conn.execute("SELECT * FROM transfer_operations WHERE id=?", (op_id,)).fetchone())
     return {
@@ -145,6 +162,8 @@ def transfer_item(item_id: int, actor: str) -> dict[str, Any]:
         "warning": op["warning"],
         "new_version": new_version,
         "backup_object": op["base_object"],
+        "onedrive_synced": onedrive_synced,
+        "onedrive_warning": onedrive_warning,
     }
 
 
