@@ -64,26 +64,21 @@ def _do(action: str, item: dict[str, Any], **payload: Any) -> None:
 
 
 def _confirm_box() -> None:
+    """Confirmation only for removing an item from the live list, not for Excel transfers."""
     conf = st.session_state.get("confirm")
     if not conf:
         return
-    action, item = conf["action"], conf["item"]
+    if conf.get("action") != "remove":
+        st.session_state.pop("confirm", None)
+        return
+    item = conf["item"]
     with st.container(border=True):
-        if action == "transfer":
-            st.warning(
-                f"**Επιβεβαίωση μεταφοράς**  \n**{item['barcode']}** — {item.get('display') or ''}  \n"
-                "Η γραμμή θα αντιγραφεί στο φύλλο «Σβησμένα» και θα αφαιρεθεί από τα «Έτοιμα προϊόντα». "
-                "Πριν την αλλαγή δημιουργείται αντίγραφο ασφαλείας."
-            )
-            label = "✔ Ναι, μεταφορά στα Σβησμένα"
-        else:
-            st.warning(f"**Αφαίρεση από την ενεργή λίστα:** {item['barcode']}  \n(Το Excel δεν αλλάζει.)")
-            label = "✔ Ναι, αφαίρεση"
+        st.warning(f"**Αφαίρεση από την ενεργή λίστα:** {item['barcode']}  \\n(Το Excel δεν αλλάζει.)")
         c1, c2, _ = st.columns([2, 1, 3])
-        if c1.button(label, type="primary", key=f"yes-{action}-{item['id']}"):
-            _do(action, item)
+        if c1.button("✔ Ναι, αφαίρεση", type="primary", key=f"yes-remove-{item['id']}"):
+            _do("remove", item)
             st.rerun(scope="fragment")
-        if c2.button("Άκυρο", key=f"no-{action}-{item['id']}"):
+        if c2.button("Άκυρο", key=f"no-remove-{item['id']}"):
             st.session_state.pop("confirm", None)
             st.rerun(scope="fragment")
 
@@ -146,7 +141,7 @@ def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
         c[6].markdown(f"<div class='row-cell'>{badge}</div>", unsafe_allow_html=True)
         if it["state"] == "ok":
             if c[7].button("Μεταφορά στα Σβησμένα", key=f"tr-{it['id']}", disabled=busy, width="stretch"):
-                st.session_state["confirm"] = {"action": "transfer", "item": it}
+                _do("transfer", it)
                 st.rerun(scope="fragment")
         else:
             c[7].markdown("<div class='row-cell'>Έλεγχος ⟶ «Προς έλεγχο»</div>", unsafe_allow_html=True)
