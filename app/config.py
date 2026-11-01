@@ -1,14 +1,21 @@
 """Κεντρικές ρυθμίσεις εφαρμογής.
 
-Όλες οι ρυθμίσεις διαβάζονται από environment variables ή από αρχείο `.env`
-στη ρίζα του project (που ΔΕΝ ανεβαίνει στο GitHub).
+Παραγωγή (Streamlit Community Cloud): όλα από τα **Streamlit Secrets** (`st.secrets`):
+
+    [database]   url            -> Supabase PostgreSQL (connection string, pooler)
+    [supabase]   url, service_key, bucket  -> Supabase Storage (private bucket)
+    [auth]       secret_key, admin_password, secretary_password, scanner_password
+
+Τοπική ανάπτυξη / tests: environment variables (APP_*). Με `APP_DEV_SQLITE` και
+`APP_DEV_STORAGE_DIR` η εφαρμογή χρησιμοποιεί τοπικό SQLite και φάκελο αντί για Supabase.
+Το SQLite ΔΕΝ επιτρέπεται στο Streamlit Cloud (προσωρινό filesystem).
 """
 from __future__ import annotations
 
 import os
-import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -18,117 +25,99 @@ DEFAULT_SOURCE_SHEET = "΄Ετοιμα προϊόντα"
 DEFAULT_TARGET_SHEET = "Σβησμενα "
 
 
-def _load_dotenv(path: Path) -> None:
-    """Απλός loader για `.env` (KEY=VALUE). Δεν αντικαθιστά υπάρχουσες μεταβλητές."""
-    if not path.is_file():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
+class ConfigError(Exception):
+    """Λείπουν ή είναι λάθος οι ρυθμίσεις (Secrets)."""
 
 
-def _env(name: str, default: str | None = None) -> str | None:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
-    return value
+def _secrets() -> dict[str, Any]:
+    """Διαβάζει τα Streamlit Secrets, αν υπάρχουν (χωρίς να αποτυγχάνει εκτός Streamlit)."""
+    try:
+        import streamlit as st
+
+        try:
+            return {k: (dict(v) if hasattr(v, "keys") else v) for k, v in st.secrets.items()}
+        except Exception:  # δεν υπάρχει secrets.toml
+            return {}
+    except ImportError:  # pragma: no cover
+        return {}
+
+
+def _get(secrets: dict[str, Any], section: str, key: str, env: str, default: Any = None) -> Any:
+    value = os.environ.get(env)
+    if value not in (None, ""):
+        return value
+    sec = secrets.get(section)
+    if isinstance(sec, dict) and sec.get(key) not in (None, ""):
+        return sec[key]
+    return default
 
 
 @dataclass
 class Settings:
-    data_dir: Path
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-    ui_port: int = 8501
-    api_internal_url: str = "http://127.0.0.1:8000"
-    timezone: str = "Europe/Athens"
+    # βάση
+    database_url: str | None = None
+    dev_sqlite_path: Path | None = None
+    # αποθήκευση αρχείων
+    supabase_url: str | None = None
+    supabase_service_key: str | None = None
+    supabase_bucket: str = "warehouse-excel"
+    dev_storage_dir: Path | None = None
+    # ασφάλεια
     secret_key: str = ""
     passwords: dict[str, str] = field(default_factory=dict)
     scanner_token_hours: int = 24 * 30
     user_token_hours: int = 12
+    # λοιπά
+    timezone: str = "Europe/Athens"
     source_sheet: str = DEFAULT_SOURCE_SHEET
     target_sheet: str = DEFAULT_TARGET_SHEET
+    cache_dir: Path = Path(os.environ.get("APP_CACHE_DIR", "/tmp/warehouse-cache"))
     log_level: str = "INFO"
 
-    # --- παράγωγα paths -------------------------------------------------
     @property
-    def db_path(self) -> Path:
-        return self.data_dir / "warehouse.sqlite3"
+    def uses_postgres(self) -> bool:
+        return bool(self.database_url)
 
-    @property
-    def imports_dir(self) -> Path:
-        return self.data_dir / "imports"
-
-    @property
-    def staging_dir(self) -> Path:
-        return self.data_dir / "staging"
-
-    @property
-    def backups_dir(self) -> Path:
-        return self.data_dir / "backups"
-
-    @property
-    def logs_dir(self) -> Path:
-        return self.data_dir / "logs"
-
-    def ensure_dirs(self) -> None:
-        for d in (self.data_dir, self.imports_dir, self.staging_dir, self.backups_dir, self.logs_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-
-def _resolve_secret(data_dir: Path) -> str:
-    key = _env("APP_SECRET_KEY")
-    if key:
-        return key
-    # Αν δεν δόθηκε, δημιουργείται μία φορά και φυλάσσεται τοπικά στον φάκελο δεδομένων.
-    data_dir.mkdir(parents=True, exist_ok=True)
-    key_file = data_dir / "secret.key"
-    if key_file.is_file():
-        return key_file.read_text(encoding="utf-8").strip()
-    key = secrets.token_hex(32)
-    key_file.write_text(key, encoding="utf-8")
-    return key
+    def problems(self) -> list[str]:
+        """Λίστα προβλημάτων ρύθμισης (κενή = όλα εντάξει)."""
+        out = []
+        if not self.database_url and not self.dev_sqlite_path:
+            out.append("Λείπει το `[database] url` (Supabase PostgreSQL connection string) από τα Secrets.")
+        if not (self.supabase_url and self.supabase_service_key) and not self.dev_storage_dir:
+            out.append("Λείπουν τα `[supabase] url` και `service_key` από τα Secrets (Supabase Storage).")
+        if not self.secret_key or len(self.secret_key) < 16:
+            out.append("Λείπει το `[auth] secret_key` (τυχαίο κείμενο τουλάχιστον 32 χαρακτήρων).")
+        missing = [r for r in ("admin", "secretary", "scanner") if r not in self.passwords]
+        if missing:
+            out.append("Λείπουν κωδικοί ρόλων στο `[auth]`: " + ", ".join(f"{r}_password" for r in missing))
+        return out
 
 
 def load_settings() -> Settings:
-    _load_dotenv(PROJECT_ROOT / ".env")
-    data_dir = Path(_env("APP_DATA_DIR", str(PROJECT_ROOT / "data")))  # type: ignore[arg-type]
-    if not data_dir.is_absolute():
-        data_dir = (PROJECT_ROOT / data_dir).resolve()
-    api_port = int(_env("APP_API_PORT", "8000"))  # type: ignore[arg-type]
+    sec = _secrets()
+    sqlite = _get(sec, "dev", "sqlite_path", "APP_DEV_SQLITE")
+    storage_dir = _get(sec, "dev", "storage_dir", "APP_DEV_STORAGE_DIR")
     passwords = {
-        role: pw
-        for role, pw in (
-            ("admin", _env("APP_ADMIN_PASSWORD")),
-            ("secretary", _env("APP_SECRETARY_PASSWORD")),
-            ("scanner", _env("APP_SCANNER_PASSWORD")),
-        )
-        if pw
+        role: str(pw)
+        for role in ("admin", "secretary", "scanner")
+        if (pw := _get(sec, "auth", f"{role}_password", f"APP_{role.upper()}_PASSWORD"))
     }
-    s = Settings(
-        data_dir=data_dir,
-        api_host=_env("APP_API_HOST", "0.0.0.0"),  # type: ignore[arg-type]
-        api_port=api_port,
-        ui_port=int(_env("APP_UI_PORT", "8501")),  # type: ignore[arg-type]
-        api_internal_url=_env("APP_API_INTERNAL_URL", f"http://127.0.0.1:{api_port}"),  # type: ignore[arg-type]
-        timezone=_env("APP_TIMEZONE", "Europe/Athens"),  # type: ignore[arg-type]
-        secret_key=_resolve_secret(data_dir),
+    return Settings(
+        database_url=_get(sec, "database", "url", "APP_DATABASE_URL"),
+        dev_sqlite_path=Path(sqlite) if sqlite else None,
+        supabase_url=(_get(sec, "supabase", "url", "APP_SUPABASE_URL") or None),
+        supabase_service_key=_get(sec, "supabase", "service_key", "APP_SUPABASE_SERVICE_KEY"),
+        supabase_bucket=_get(sec, "supabase", "bucket", "APP_SUPABASE_BUCKET", "warehouse-excel"),
+        dev_storage_dir=Path(storage_dir) if storage_dir else None,
+        secret_key=str(_get(sec, "auth", "secret_key", "APP_SECRET_KEY", "")),
         passwords=passwords,
-        scanner_token_hours=int(_env("APP_SCANNER_TOKEN_HOURS", str(24 * 30))),  # type: ignore[arg-type]
-        user_token_hours=int(_env("APP_USER_TOKEN_HOURS", "12")),  # type: ignore[arg-type]
-        source_sheet=_env("APP_SOURCE_SHEET", DEFAULT_SOURCE_SHEET),  # type: ignore[arg-type]
-        target_sheet=_env("APP_TARGET_SHEET", DEFAULT_TARGET_SHEET),  # type: ignore[arg-type]
-        log_level=_env("APP_LOG_LEVEL", "INFO"),  # type: ignore[arg-type]
+        scanner_token_hours=int(_get(sec, "auth", "scanner_token_hours", "APP_SCANNER_TOKEN_HOURS", 24 * 30)),
+        user_token_hours=int(_get(sec, "auth", "user_token_hours", "APP_USER_TOKEN_HOURS", 12)),
+        timezone=_get(sec, "app", "timezone", "APP_TIMEZONE", "Europe/Athens"),
+        source_sheet=_get(sec, "app", "source_sheet", "APP_SOURCE_SHEET", DEFAULT_SOURCE_SHEET),
+        target_sheet=_get(sec, "app", "target_sheet", "APP_TARGET_SHEET", DEFAULT_TARGET_SHEET),
+        log_level=_get(sec, "app", "log_level", "APP_LOG_LEVEL", "INFO"),
     )
-    s.ensure_dirs()
-    return s
 
 
 _settings: Settings | None = None

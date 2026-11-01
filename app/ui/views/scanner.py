@@ -1,38 +1,26 @@
-"""Σελίδα «Scanner / Αποθήκη»: οδηγεί στην αφιερωμένη οθόνη σάρωσης.
-
-Η ίδια η σάρωση γίνεται σε ξεχωριστή σελίδα (HTML/JS) που εξυπηρετείται από το FastAPI,
-ώστε η λήψη πλήκτρων, το IndexedDB και το Fullscreen API να λειτουργούν αξιόπιστα χωρίς
-Streamlit reruns και χωρίς iframe.
-"""
+"""Σελίδα «Scanner / Αποθήκη»: η οθόνη σάρωσης μέσα στην εφαρμογή Streamlit."""
 from __future__ import annotations
 
 import streamlit as st
 
-from app.ui.api_client import ApiClient, ApiError
-from app.ui.common import scanner_url
+from app import backend
+from app.services.errors import ServiceError
+from app.ui.common import require, show_error
+from app.ui.components.scanner import scanner_panel
 
 
 def page() -> None:
-    st.title("Scanner / Αποθήκη")
-    url = scanner_url()
-    st.markdown(
-        f"""
-Η οθόνη σάρωσης ανοίγει σε **ξεχωριστή σελίδα**, σχεδιασμένη για εργασία χωρίς ποντίκι:
-
-* Διεύθυνση για το PC με τον δέκτη του scanner: **`{url}`**
-* Πατήστε **«Πλήρης Οθόνη»** (ή F9). Έξοδος με **Esc**.
-* Κάθε barcode αποθηκεύεται πρώτα τοπικά στον browser και μετά στέλνεται στον server· αν χαθεί το δίκτυο,
-  συνεχίζει να καταγράφει και στέλνει αυτόματα τα εκκρεμή όταν επανέλθει.
-"""
-    )
-    st.link_button("▶ Άνοιγμα οθόνης σάρωσης", url, type="primary")
+    if not require("scan"):
+        return
     try:
-        cfg = ApiClient().get("/api/config", timeout=5)
-        if cfg.get("has_catalog"):
-            st.success(f"Ενεργό Excel: {cfg.get('catalog_name')}")
-        else:
-            st.error("Δεν υπάρχει ενεργό Excel — οι σαρώσεις δεν θα είναι έγκυρες μέχρι να ανέβει αρχείο από τις Ρυθμίσεις.")
-        term = "Enter ή Tab" if cfg.get("terminator") == "enter_tab" else "Enter"
-        st.caption(f"Τερματικός χαρακτήρας scanner: {term}")
-    except ApiError as exc:
-        st.error(exc.message)
+        cfg = backend.public_config()
+    except ServiceError as exc:
+        show_error(exc)
+        return
+    if not cfg["has_catalog"]:
+        st.error("Δεν υπάρχει ενεργό Excel — οι σαρώσεις καταγράφονται αλλά δεν θα είναι έγκυρες μέχρι να "
+                 "ανεβάσει ο διαχειριστής αρχείο από τις Ρυθμίσεις.")
+    scanner_panel(cfg)
+    st.caption("Σκανάρετε χωρίς ποντίκι — η σελίδα «ακούει» το πληκτρολόγιο. **Πλήρης Οθόνη** ή F9, έξοδος με Esc. "
+               "Κάθε barcode φυλάσσεται πρώτα στον browser και διαγράφεται από εκεί μόνο όταν επιβεβαιωθεί η "
+               "αποθήκευση στη βάση.")

@@ -53,7 +53,7 @@ def query(
         where.append("(s.barcode LIKE ? OR s.barcode_norm LIKE ?)")
         params += [f"%{barcode.strip()}%", f"%{barcode.strip().upper()}%"]
     if customer:
-        where.append("json_extract(s.product_snapshot, '$.pelatis') LIKE ?")
+        where.append("s.pelatis LIKE ?")
         params.append(f"%{customer.strip()}%")
     if result:
         where.append("s.result = ?")

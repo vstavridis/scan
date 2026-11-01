@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from app import backend
 from app.services.aggregation import aggregate, totals
 from app.services.normalize import group_key
 from tests.conftest import activate_workbook, login, scan
@@ -56,10 +57,10 @@ def test_unknown_and_ambiguous_do_not_add_kilos():
     assert totals(items, groups)["problem"] == 2
 
 
-def test_sum_via_api(client, synthetic_master, tmp_path):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS90001", "VS11486", "VS90002", "VS90003")
-    dash = client.get("/api/dashboard", headers=login(client, "secretary")).json()
+def test_sum_via_backend(app_env, synthetic_master):
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS90001", "VS11486", "VS90002", "VS90003")
+    dash = backend.dashboard(login("secretary"))
     table = sorted((g["product"], g["total_display"], g["pelatis"]) for g in dash["groups"])
     assert table == sorted([
         ("ΗΛΕΚΤΡΟΓΑΛΒΑΝΙΖΕ × 0.70 × 180ΧΡΟΛΟ", "924", "ΑΠΟΘΗΚΗ"),

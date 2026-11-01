@@ -1,8 +1,12 @@
 """Tests 1 & 5: αναζήτηση barcode και διπλά barcode μέσα στο Excel."""
 from __future__ import annotations
 
+import pytest
+
+from app import backend
 from app.config import DEFAULT_SOURCE_SHEET, DEFAULT_TARGET_SHEET
 from app.excel.reader import validate_workbook
+from app.services.errors import ServiceError
 from app.services.normalize import format_kilos, normalize_barcode, parse_kilos, product_display
 from tests.conftest import activate_workbook, login, scan
 
@@ -28,9 +32,9 @@ def test_validate_and_lookup_vs11486(workbook_copy, app_env):
                            p.values["pelatis"]) == "ΗΛΕΚΤΡΟΓΑΛΒΑΝΙΖΕ × 0.70 × 180ΧΡΟΛΟ / 412 - ΑΠΟΘΗΚΗ"
 
 
-def test_scan_vs11486_via_api(client, workbook_copy):
-    activate_workbook(client, workbook_copy)
-    res = scan(client, login(client, "scanner"), "VS11486")[0]
+def test_scan_vs11486_via_backend(app_env, workbook_copy):
+    activate_workbook(workbook_copy)
+    res = scan(login("scanner"), "VS11486")[0]
     assert res["result"] == "ok"
     assert res["kila"] == "412"
     assert res["display"] == "ΗΛΕΚΤΡΟΓΑΛΒΑΝΙΖΕ × 0.70 × 180ΧΡΟΛΟ / 412 - ΑΠΟΘΗΚΗ"
@@ -44,27 +48,25 @@ def test_excel_duplicate_barcode_detected(workbook_copy, app_env):
     assert kilos[0] != kilos[1]  # διαφορετικά κιλά — δεν επιλέγουμε αυθαίρετα
 
 
-def test_ambiguous_scan_adds_no_kilos_and_cannot_transfer(client, workbook_copy):
-    activate_workbook(client, workbook_copy)
-    res = scan(client, login(client, "scanner"), "EX434-1")[0]
+def test_ambiguous_scan_adds_no_kilos_and_cannot_transfer(app_env, workbook_copy):
+    activate_workbook(workbook_copy)
+    res = scan(login("scanner"), "EX434-1")[0]
     assert res["result"] == "ambiguous"
     assert "Αμφίσημο" in res["message"]
-    sec = login(client, "secretary")
-    dash = client.get("/api/dashboard", headers=sec).json()
+    sec = login("secretary")
+    dash = backend.dashboard(sec)
     assert dash["totals"]["ambiguous"] == 1
     assert dash["totals"]["total_kilos"] == "0"
     item = dash["items"][0]
-    cands = client.get(f"/api/items/{item['id']}/candidates", headers=sec).json()
+    cands = backend.candidates(sec, item["id"])
     assert len(cands) == 2
     # δεν επιτρέπεται αυτόματη μεταφορά
-    r = client.post(f"/api/items/{item['id']}/transfer", headers=sec)
-    assert r.status_code == 400
+    with pytest.raises(ServiceError):
+        backend.transfer_item(sec, item["id"])
     # μετά από ρητή επιλογή γραμμής, μετράνε τα κιλά της επιλεγμένης γραμμής
     chosen = next(c for c in cands if parse_kilos(c["kila"]) == 490)
-    r = client.post(f"/api/items/{item['id']}/resolve", json={"product_record_id": chosen["id"]}, headers=sec)
-    assert r.status_code == 200
-    dash = client.get("/api/dashboard", headers=sec).json()
-    assert dash["totals"]["total_kilos"] == "490"
+    backend.resolve_item(sec, item["id"], chosen["id"])
+    assert backend.dashboard(sec)["totals"]["total_kilos"] == "490"
 
 
 def test_normalization():

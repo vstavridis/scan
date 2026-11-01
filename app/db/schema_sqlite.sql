@@ -1,20 +1,27 @@
--- Σχήμα βάσης δεδομένων (SQLite, WAL mode).
--- Η βάση είναι η κεντρική πηγή αλήθειας για scan events, ενεργή λίστα και ιστορικό.
+-- Σχήμα SQLite: ΜΟΝΟ για τοπικά tests/ανάπτυξη (ίδιο με το schema_postgres.sql).
+-- Χρονοσφραγίδες ως ISO-8601 UTC TEXT, κιλά ως Decimal TEXT.
+--
+-- Χρονοσφραγίδες: ISO-8601 UTC ως TEXT (ίδια μορφή με την τοπική έκδοση SQLite,
+-- λεξικογραφική ταξινόμηση = χρονολογική).
+-- Κιλά: Decimal ως TEXT (ακριβής αριθμητική στην Python, ποτέ float).
 
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
--- Κάθε ανέβασμα Excel που ενεργοποιήθηκε (έκδοση εισαγωγής).
+-- Εκδόσεις εισαγωγής Excel. Τα αρχεία βρίσκονται στο Supabase Storage (private bucket).
 CREATE TABLE IF NOT EXISTS excel_imports (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     original_filename   TEXT    NOT NULL,
-    original_path       TEXT    NOT NULL,        -- αναλλοίωτο αρχικό αρχείο
-    working_path        TEXT    NOT NULL,        -- working copy που ενημερώνεται από τις μεταφορές
+    original_object     TEXT    NOT NULL DEFAULT '',   -- αναλλοίωτο αρχικό αρχείο
+    working_object      TEXT    NOT NULL DEFAULT '',   -- τρέχουσα έκδοση working Excel
+    working_version     INTEGER NOT NULL DEFAULT 0,    -- αυξάνεται σε κάθε μεταφορά (version check)
+    working_sha256      TEXT    NOT NULL DEFAULT '',
     original_sha256     TEXT    NOT NULL,
     imported_at         TEXT    NOT NULL,
     imported_by         TEXT    NOT NULL,
+    status              TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'ready', 'failed')),
     is_active           INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0, 1)),
     product_count       INTEGER NOT NULL,
     unique_barcodes     INTEGER NOT NULL,
@@ -25,25 +32,36 @@ CREATE TABLE IF NOT EXISTS excel_imports (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_imports_single_active ON excel_imports(is_active) WHERE is_active = 1;
 
--- Γραμμές προϊόντων του φύλλου πηγής (κατάλογος αναζήτησης).
+-- Αρχεία που ανέβηκαν και ελέγχθηκαν αλλά δεν ενεργοποιήθηκαν ακόμη.
+CREATE TABLE IF NOT EXISTS staged_uploads (
+    id           TEXT PRIMARY KEY,
+    filename     TEXT NOT NULL,
+    object_path  TEXT NOT NULL,
+    sha256       TEXT NOT NULL,
+    uploaded_by  TEXT NOT NULL,
+    uploaded_at  TEXT NOT NULL,
+    report_json  TEXT NOT NULL
+);
+
+-- Γραμμές του φύλλου πηγής: κατάλογος γρήγορης αναζήτησης barcode.
 CREATE TABLE IF NOT EXISTS product_records (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    import_id     INTEGER NOT NULL REFERENCES excel_imports(id),
-    sheet_row     INTEGER NOT NULL,              -- γραμμή κατά την εισαγωγή (ενημερώνεται μετά από μεταφορές)
-    barcode       TEXT    NOT NULL,              -- όπως στο Excel
-    barcode_norm  TEXT    NOT NULL,              -- κανονικοποιημένο για αναζήτηση
+    import_id     BIGINT  NOT NULL REFERENCES excel_imports(id),
+    sheet_row     INTEGER NOT NULL,
+    barcode       TEXT    NOT NULL,
+    barcode_norm  TEXT    NOT NULL,
     eidos         TEXT,
     paxos         TEXT,
     diastaseis    TEXT,
     temaxia       TEXT,
-    kila          TEXT,                          -- Decimal ως κείμενο
+    kila          TEXT,
     pelatis       TEXT,
     vspg          TEXT,
     topothesia    TEXT,
     thesi         TEXT,
     rolo          TEXT,
     extra_json    TEXT,
-    fingerprint   TEXT    NOT NULL,              -- sha256 των ακατέργαστων τιμών της γραμμής
+    fingerprint   TEXT    NOT NULL,
     group_key     TEXT    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'transferred')),
     transferred_at TEXT
@@ -51,15 +69,15 @@ CREATE TABLE IF NOT EXISTS product_records (
 CREATE INDEX IF NOT EXISTS ix_products_lookup ON product_records(import_id, barcode_norm);
 CREATE INDEX IF NOT EXISTS ix_products_fp ON product_records(import_id, fingerprint);
 
--- Ενεργή λίστα (ό,τι φαίνεται στην αποθήκη και στη γραμματεία).
+-- Ενεργή λίστα (κοινή για αποθήκη και γραμματεία).
 CREATE TABLE IF NOT EXISTS active_items (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     barcode             TEXT    NOT NULL,
     barcode_norm        TEXT    NOT NULL,
     state               TEXT    NOT NULL CHECK (state IN ('ok', 'ambiguous', 'unknown')),
-    product_record_id   INTEGER REFERENCES product_records(id),
-    import_id           INTEGER REFERENCES excel_imports(id),
-    first_scan_event_id INTEGER,
+    product_record_id   BIGINT REFERENCES product_records(id),
+    import_id           BIGINT REFERENCES excel_imports(id),
+    first_scan_event_id BIGINT,
     duplicate_count     INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT    NOT NULL,
     status              TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'transferred', 'removed')),
@@ -67,56 +85,67 @@ CREATE TABLE IF NOT EXISTS active_items (
     closed_by           TEXT,
     close_reason        TEXT
 );
--- Ένα barcode μπορεί να υπάρχει μόνο μία φορά στην ενεργή λίστα.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_active_barcode ON active_items(barcode_norm) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS ix_active_status ON active_items(status);
 
--- Μόνιμο ιστορικό κάθε σκαναρίσματος (δεν διαγράφεται ποτέ).
+-- Μόνιμο ιστορικό κάθε σκαναρίσματος. Το event_id (UUID του browser) είναι UNIQUE:
+-- η επαναποστολή ίδιου scan δεν δημιουργεί δεύτερη εγγραφή (idempotency).
 CREATE TABLE IF NOT EXISTS scan_events (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id         TEXT    NOT NULL UNIQUE,    -- μοναδικό ID από τον browser (idempotency)
+    event_id         TEXT    NOT NULL UNIQUE,
     barcode          TEXT    NOT NULL,
     barcode_norm     TEXT    NOT NULL,
     client_ts        TEXT,
     received_at      TEXT    NOT NULL,
     device_id        TEXT,
-    client_seq       INTEGER,
+    client_seq       BIGINT,
     result           TEXT    NOT NULL CHECK (result IN ('ok', 'duplicate', 'unknown', 'ambiguous', 'no_catalog', 'invalid')),
     message          TEXT,
-    product_record_id INTEGER REFERENCES product_records(id),
-    product_snapshot TEXT,                       -- JSON στοιχείων προϊόντος τη στιγμή του scan
+    product_record_id BIGINT REFERENCES product_records(id),
+    product_snapshot TEXT,
+    pelatis          TEXT,
     kila             TEXT,
-    import_id        INTEGER REFERENCES excel_imports(id),
-    active_item_id   INTEGER REFERENCES active_items(id)
+    import_id        BIGINT REFERENCES excel_imports(id),
+    active_item_id   BIGINT REFERENCES active_items(id)
 );
 CREATE INDEX IF NOT EXISTS ix_scans_received ON scan_events(received_at);
 CREATE INDEX IF NOT EXISTS ix_scans_barcode ON scan_events(barcode_norm);
 CREATE INDEX IF NOT EXISTS ix_scans_active ON scan_events(active_item_id);
 
--- Journal μεταφορών προς το φύλλο "Σβησμένα".
+-- Operation journal μεταφορών. Η αλλαγή του working Excel "δεσμεύεται" μόνο όταν, στο
+-- ΙΔΙΟ transaction, ενημερωθεί ο δείκτης excel_imports.working_version (version check)
+-- και η εγγραφή γίνει 'completed'.
 CREATE TABLE IF NOT EXISTS transfer_operations (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    active_item_id     INTEGER REFERENCES active_items(id),
-    product_record_id  INTEGER NOT NULL REFERENCES product_records(id),
-    import_id          INTEGER NOT NULL REFERENCES excel_imports(id),
+    active_item_id     BIGINT REFERENCES active_items(id),
+    product_record_id  BIGINT NOT NULL REFERENCES product_records(id),
+    import_id          BIGINT NOT NULL REFERENCES excel_imports(id),
     barcode            TEXT    NOT NULL,
     fingerprint        TEXT    NOT NULL,
     status             TEXT    NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
-    mode               TEXT,                     -- 'shift' (φυσική αφαίρεση) ή 'clear' (ασφαλής εναλλακτική)
+    mode               TEXT,
     requested_by       TEXT    NOT NULL,
     started_at         TEXT    NOT NULL,
     finished_at        TEXT,
     source_row         INTEGER,
     target_row         INTEGER,
+    base_version       INTEGER,
+    base_object        TEXT,                 -- προηγούμενη έκδοση (backup, δεν σβήνεται ποτέ)
     excel_before_sha256 TEXT,
+    new_object         TEXT,
     excel_after_sha256  TEXT,
-    backup_path        TEXT,
     warning            TEXT,
     error              TEXT
 );
--- Αποτρέπει διπλή μεταφορά της ίδιας εγγραφής (διπλό click / ταυτόχρονα requests).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_transfer_once ON transfer_operations(product_record_id)
     WHERE status IN ('started', 'completed');
+
+-- Leases για ενέργειες που διαρκούν πέρα από ένα DB transaction (εγγραφή Excel).
+CREATE TABLE IF NOT EXISTS app_locks (
+    name        TEXT PRIMARY KEY,
+    holder      TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,3 +160,4 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+

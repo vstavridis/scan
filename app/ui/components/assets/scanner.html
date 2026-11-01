@@ -1,0 +1,31 @@
+<div class="whs-root" tabindex="-1">
+  <header class="whs-top">
+    <div class="whs-pill whs-pill-wait" data-ref="conn">Σύνδεση…</div>
+    <div class="whs-counters">
+      <div class="whs-counter"><span data-ref="c-ok">0</span><small>ενεργά barcode</small></div>
+      <div class="whs-counter"><span data-ref="c-pending">0</span><small>εκκρεμή</small></div>
+      <div class="whs-counter whs-dim"><span data-ref="c-problem">0</span><small>προς έλεγχο</small></div>
+    </div>
+    <div class="whs-actions">
+      <button type="button" data-ref="btn-fs" title="Πλήρης οθόνη (F9). Έξοδος με Esc">⛶ Πλήρης Οθόνη</button>
+      <button type="button" data-ref="btn-sound-test">🔊 Δοκιμή ήχου</button>
+      <button type="button" data-ref="btn-sound">Ήχος: ΝΑΙ</button>
+    </div>
+  </header>
+  <div class="whs-warnings" data-ref="warnings"></div>
+  <section class="whs-fb whs-fb-idle" data-ref="feedback" aria-live="assertive">
+    <div class="whs-fb-barcode" data-ref="fb-barcode">Έτοιμο για σάρωση</div>
+    <div class="whs-fb-text" data-ref="fb-text">Σκανάρετε ένα barcode</div>
+  </section>
+  <main class="whs-list-wrap" data-ref="list-wrap">
+    <ol class="whs-list" data-ref="list"></ol>
+    <div class="whs-empty" data-ref="empty">Δεν υπάρχουν barcode στη λίστα.</div>
+  </main>
+  <footer class="whs-scanline">
+    <span class="whs-label">Σάρωση:</span><span class="whs-buffer" data-ref="buffer"></span><span class="whs-caret">▌</span>
+    <span class="whs-device" data-ref="device"></span>
+  </footer>
+  <div class="whs-focus hidden" data-ref="focus">
+    <div><b>Η οθόνη σάρωσης δεν είναι ενεργή</b><br>Κάντε κλικ οπουδήποτε εδώ ώστε τα barcode να καταγράφονται.</div>
+  </div>
+</div>

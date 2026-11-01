@@ -1,7 +1,10 @@
 """Κοινά fixtures.
 
-Κάθε test τρέχει σε δικό του προσωρινό φάκελο δεδομένων και σε ΑΝΤΙΓΡΑΦΟ του workbook.
-Το πραγματικό αρχείο (αν υπάρχει) δεν τροποποιείται ποτέ — ελέγχεται με sha256.
+Κάθε test τρέχει σε δική του βάση, δικό του object storage (τοπικός φάκελος) και σε ΑΝΤΙΓΡΑΦΟ
+του workbook. Το πραγματικό αρχείο (αν υπάρχει) δεν τροποποιείται ποτέ — ελέγχεται με sha256.
+
+Βάσεις: τα tests του backend τρέχουν σε SQLite ΚΑΙ σε PostgreSQL όταν οριστεί
+WAREHOUSE_TEST_PG=postgresql://user@host:port/postgres (δημιουργείται προσωρινή βάση ανά test).
 
 Πραγματικό αρχείο: ορίστε WAREHOUSE_REAL_XLSX=/path/to/Σχισμενα (1).xlsx ή τοποθετήστε το
 στο tests/fixtures/local/ (ο φάκελος αγνοείται από το git).
@@ -13,8 +16,9 @@ import os
 import shutil
 import socket
 import sys
-import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -23,6 +27,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.auth import Principal  # noqa: E402
 from tests.fixtures.make_fixture import build  # noqa: E402
 
 PASSWORDS = {"admin": "admin-pw", "secretary": "sec-pw", "scanner": "scan-pw"}
@@ -75,111 +80,107 @@ def workbook_copy(master_workbook: Path, tmp_path: Path) -> Iterator[Path]:
     assert sha256(master_workbook) == before, "Το αρχικό αρχείο δοκιμής τροποποιήθηκε!"
 
 
-def configure_env(data_dir: Path) -> None:
-    os.environ["APP_DATA_DIR"] = str(data_dir)
-    os.environ["APP_ADMIN_PASSWORD"] = PASSWORDS["admin"]
-    os.environ["APP_SECRETARY_PASSWORD"] = PASSWORDS["secretary"]
-    os.environ["APP_SCANNER_PASSWORD"] = PASSWORDS["scanner"]
-    os.environ["APP_SECRET_KEY"] = "test-secret-key"
-    from app import config
-    from app.db import database
-    from app.excel import storage
+def pg_admin_url() -> str | None:
+    return os.environ.get("WAREHOUSE_TEST_PG")
 
+
+def _reset_app_state() -> None:
+    from app import backend, config, storage
+    from app.db import database
+
+    database.close_pool()
     config.reset_settings()
     database.reset_init_cache()
     storage.set_store(None)
+    backend._started = False
 
 
-@pytest.fixture
-def app_env(tmp_path: Path) -> Iterator[Path]:
+def configure_env(data_dir: Path, db_url: str | None = None) -> dict[str, str]:
+    """Ορίζει env για την εφαρμογή (βάση + storage + κωδικοί) και επαναφέρει τις caches."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        "APP_DEV_STORAGE_DIR": str(data_dir / "storage"),
+        "APP_CACHE_DIR": str(data_dir / "cache"),
+        "APP_ADMIN_PASSWORD": PASSWORDS["admin"],
+        "APP_SECRETARY_PASSWORD": PASSWORDS["secretary"],
+        "APP_SCANNER_PASSWORD": PASSWORDS["scanner"],
+        "APP_SECRET_KEY": "test-secret-key-0123456789",
+    }
+    if db_url:
+        env["APP_DATABASE_URL"] = db_url
+        os.environ.pop("APP_DEV_SQLITE", None)
+    else:
+        env["APP_DEV_SQLITE"] = str(data_dir / "warehouse.sqlite3")
+        os.environ.pop("APP_DATABASE_URL", None)
+    os.environ.update(env)
+    _reset_app_state()
+    return env
+
+
+@contextmanager
+def temp_pg_database() -> Iterator[str]:
+    import psycopg
+
+    admin = pg_admin_url()
+    name = "wh_test_" + uuid.uuid4().hex[:12]
+    with psycopg.connect(admin, autocommit=True) as c:
+        c.execute(f'CREATE DATABASE "{name}"')
+    base, _, _db = admin.rpartition("/")
+    try:
+        yield f"{base}/{name}"
+    finally:
+        _reset_app_state()
+        with psycopg.connect(admin, autocommit=True) as c:
+            c.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+def _db_params() -> list[str]:
+    return ["sqlite", "postgres"] if pg_admin_url() else ["sqlite"]
+
+
+@pytest.fixture(params=_db_params())
+def app_env(request, tmp_path: Path) -> Iterator[Path]:
     data_dir = tmp_path / "data"
-    configure_env(data_dir)
-    yield data_dir
-    from app.excel import storage
-    storage.set_store(None)
+    if request.param == "postgres":
+        with temp_pg_database() as url:
+            configure_env(data_dir, url)
+            yield data_dir
+    else:
+        configure_env(data_dir)
+        yield data_dir
+    _reset_app_state()
 
 
-@pytest.fixture
-def client(app_env):
-    from fastapi.testclient import TestClient
-
-    from app.api.main import create_app
-
-    with TestClient(create_app()) as c:
-        yield c
+def login(role: str) -> Principal:
+    from app import backend
+    p, _token = backend.login(role, PASSWORDS[role], f"test-{role}")
+    return p
 
 
-def login(client, role: str) -> dict[str, str]:
-    r = client.post("/api/auth/login", json={"role": role, "password": PASSWORDS[role], "name": f"test-{role}"})
-    assert r.status_code == 200, r.text
-    return {"Authorization": f"Bearer {r.json()['token']}"}
+def activate_workbook(path: Path, confirm: bool = False) -> dict:
+    from app import backend
+    admin = login("admin")
+    staged = backend.stage_excel(admin, path.name, path.read_bytes())
+    assert staged["report"]["ok"], staged["report"]["errors"]
+    return backend.activate_excel(admin, staged["staging_id"], confirm)
 
 
-def activate_workbook(client, path: Path, confirm: bool = False) -> dict:
-    h = login(client, "admin")
-    r = client.post("/api/admin/imports/stage", params={"filename": path.name}, content=path.read_bytes(), headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["report"]["ok"], r.json()["report"]["errors"]
-    r = client.post("/api/admin/imports/activate", json={"staging_id": r.json()["staging_id"], "confirm_replace": confirm},
-                    headers=h)
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-def scan(client, headers, *barcodes: str, ids: list[str] | None = None) -> list[dict]:
-    import uuid
+def scan(p: Principal, *barcodes: str, ids: list[str] | None = None) -> list[dict]:
+    from app import backend
     events = [{"event_id": (ids[i] if ids else uuid.uuid4().hex), "barcode": b} for i, b in enumerate(barcodes)]
-    r = client.post("/api/scans", json={"device_id": "pytest", "events": events}, headers=headers)
-    assert r.status_code == 200, r.text
-    return r.json()["results"]
+    return backend.submit_scans(p, events, device_id="pytest")["results"]
 
 
-# --------------------------------------------------------------------------- live server
+def working_file(tmp_path: Path) -> Path:
+    """Κατεβάζει την τρέχουσα έκδοση του working Excel από το storage."""
+    from app import backend
+    _name, data = backend.working_excel(login("admin"))
+    out = tmp_path / f"working-{uuid.uuid4().hex[:6]}.xlsx"
+    out.write_bytes(data)
+    return out
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-class LiveServer:
-    """Πραγματικός uvicorn server σε thread (για ταυτόχρονα requests και restart)."""
-
-    def __init__(self, data_dir: Path):
-        self.data_dir = data_dir
-        self.port = free_port()
-        self.url = f"http://127.0.0.1:{self.port}"
-        self.server = None
-        self.thread = None
-
-    def start(self) -> "LiveServer":
-        import uvicorn
-
-        configure_env(self.data_dir)
-        from app.api.main import create_app
-
-        config = uvicorn.Config(create_app(), host="127.0.0.1", port=self.port, log_level="warning", workers=1)
-        self.server = uvicorn.Server(config)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
-        self.thread.start()
-        import httpx
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            try:
-                if httpx.get(self.url + "/api/health", timeout=1).status_code == 200:
-                    return self
-            except httpx.HTTPError:
-                time.sleep(0.1)
-        raise RuntimeError("Ο server δεν ξεκίνησε")
-
-    def stop(self) -> None:
-        if self.server is not None:
-            self.server.should_exit = True
-            self.thread.join(timeout=20)
-            self.server = None
-
-
-@pytest.fixture
-def live_server(tmp_path: Path) -> Iterator[LiveServer]:
-    srv = LiveServer(tmp_path / "data").start()
-    yield srv
-    srv.stop()

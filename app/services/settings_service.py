@@ -16,7 +16,9 @@ DEFAULTS: dict[str, Any] = {
     "scanner_sound_default": True,
     # Μέγιστο κενό (ms) μεταξύ πλήκτρων· μετά από αυτό, ο buffer θεωρείται νέα πληκτρολόγηση
     "scanner_inter_key_timeout_ms": 0,
-    "dashboard_refresh_seconds": 1.0,
+    "dashboard_refresh_seconds": 1.5,
+    # Πόσο συχνά η οθόνη σάρωσης ανανεώνει την κοινή ενεργή λίστα (αλλαγές από τη γραμματεία)
+    "scanner_refresh_seconds": 2.0,
     # "auto": φυσική αφαίρεση όταν είναι ασφαλής, αλλιώς καθαρισμός γραμμής με προειδοποίηση
     "transfer_mode": "auto",
 }
@@ -58,8 +60,8 @@ def validate(values: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"Μη έγκυρη τιμή για {key}")
         elif isinstance(default, float):
             value = float(value)
-            if not 0.2 <= value <= 60:
-                raise ValueError("Ο χρόνος ανανέωσης πρέπει να είναι 0.2–60 δευτερόλεπτα")
+            if not 0.5 <= value <= 60:
+                raise ValueError("Ο χρόνος ανανέωσης πρέπει να είναι 0.5–60 δευτερόλεπτα")
         clean[key] = value
     return clean
 

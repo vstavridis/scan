@@ -1,7 +1,10 @@
-"""Απλή αλλά πραγματική προστασία endpoints με ρόλους.
+"""Ρόλοι και δικαιώματα.
 
-Token = base64url(JSON payload) + "." + HMAC-SHA256 υπογραφή με APP_SECRET_KEY.
-Οι κωδικοί ρόλων ορίζονται σε environment variables (εκτός GitHub).
+Οι έλεγχοι γίνονται στο Python backend (app/backend.py) σε ΚΑΘΕ ενέργεια, όχι μόνο με
+κρυμμένα κουμπιά. Οι κωδικοί ρόλων και το μυστικό κλειδί βρίσκονται στα Streamlit Secrets.
+
+Token "θυμήσου αυτή τη συσκευή" = base64url(JSON payload) + "." + HMAC-SHA256 με το
+`[auth] secret_key`. Ο browser κρατά μόνο αυτό το υπογεγραμμένο token, κανένα κλειδί βάσης.
 """
 from __future__ import annotations
 
@@ -12,9 +15,8 @@ import json
 import time
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, Query
-
 from app.config import get_settings
+from app.services.errors import ServiceError
 
 ROLES = ("scanner", "secretary", "admin")
 ROLE_LABELS = {"scanner": "Αποθήκη (Scanner)", "secretary": "Γραμματεία", "admin": "Διαχειριστής"}
@@ -83,26 +85,15 @@ def check_password(role: str, password: str) -> bool:
     return hmac.compare_digest(expected.encode("utf-8"), password.encode("utf-8"))
 
 
-def _principal(authorization: str | None = Header(default=None), token: str | None = Query(default=None)) -> Principal:
-    raw = None
-    if authorization and authorization.lower().startswith("bearer "):
-        raw = authorization[7:].strip()
-    elif token:
-        raw = token
-    if not raw:
-        raise HTTPException(status_code=401, detail="Απαιτείται σύνδεση.")
-    p = verify_token(raw)
-    if p is None:
-        raise HTTPException(status_code=401, detail="Η σύνδεση έληξε ή δεν είναι έγκυρη. Συνδεθείτε ξανά.")
-    return p
+class PermissionDenied(ServiceError):
+    status_code = 403
+    code = "forbidden"
 
 
-def require(permission: str):
-    allowed = PERMISSIONS[permission]
-
-    def dep(p: Principal = Depends(_principal)) -> Principal:
-        if p.role not in allowed:
-            raise HTTPException(status_code=403, detail="Δεν έχετε δικαίωμα για αυτή την ενέργεια.")
-        return p
-
-    return dep
+def authorize(principal: Principal | None, permission: str) -> Principal:
+    """Ελέγχει δικαίωμα· raise PermissionDenied αλλιώς."""
+    if principal is None:
+        raise PermissionDenied("Απαιτείται σύνδεση.")
+    if principal.role not in PERMISSIONS[permission]:
+        raise PermissionDenied("Δεν έχετε δικαίωμα για αυτή την ενέργεια.")
+    return principal

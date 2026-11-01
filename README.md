@@ -1,242 +1,175 @@
-# Αποθήκη Barcode — Σάρωση & Διαχείριση Αποθέματος
+# Αποθήκη Barcode — Σάρωση & Διαχείριση Αποθέματος (Streamlit Cloud)
 
-Web εφαρμογή για τοπικό δίκτυο που αντικαθιστά την καταγραφή barcode σε Word:
+Web εφαρμογή που ανοίγει **μόνο από browser**. Δεν εγκαθίσταται τίποτα στους υπολογιστές Windows: ούτε Python, ούτε τοπικός server, ούτε PowerShell.
 
-* **Οθόνη σάρωσης (αποθήκη)**: καταγράφει τα barcode του ασύρματου scanner (keyboard wedge) σε πραγματικό χρόνο, με μεγάλα γράμματα, χρώματα, ήχους, πλήρη οθόνη και **τοπική ουρά (IndexedDB)** για διακοπές δικτύου.
-* **Γραμματεία**: ζωντανή εικόνα από άλλο PC, συγκεντρωτικός πίνακας κιλών (SUM), αναζήτηση, έλεγχος αμφίσημων/άγνωστων και **μεταφορά προϊόντων** από το φύλλο `΄Ετοιμα προϊόντα` στο `Σβησμενα `.
-* **Ιστορικό**: μόνιμη καταγραφή κάθε σκαναρίσματος, φίλτρα, εξαγωγή CSV/Excel.
-* **Ρυθμίσεις** (Admin): ανέβασμα/έλεγχος/ενεργοποίηση Excel, λήψη ενημερωμένου αρχείου και αντιγράφων ασφαλείας, ρυθμίσεις scanner.
+* **Scanner / Αποθήκη**: καταγράφει σε πραγματικό χρόνο τα barcode του ασύρματου scanner (keyboard wedge). Έχει μεγάλα γράμματα, χρώματα, ήχους, πλήρη οθόνη και **τοπική ουρά (IndexedDB)** για διακοπές σύνδεσης.
+* **Γραμματεία / Dashboard**: ζωντανή εικόνα από άλλο υπολογιστή, SUM κιλών ανά είδος/πάχος/διαστάσεις/πελάτη, έλεγχος αμφίσημων/άγνωστων, **μεταφορά** από `΄Ετοιμα προϊόντα` σε `Σβησμενα `.
+* **Ιστορικό**: μόνιμη καταγραφή κάθε σκαναρίσματος και μεταφοράς, φίλτρα, εξαγωγή CSV/Excel.
+* **Ρυθμίσεις** (Admin): ανέβασμα/έλεγχος/ενεργοποίηση Excel, στατιστικά, λήψη ενημερωμένου Excel και backups.
 
 ---
 
 ## 1. Αρχιτεκτονική
 
 ```
- PC αποθήκης (scanner USB)                PC γραμματείας
- ┌─────────────────────────┐              ┌──────────────────────────┐
- │ Browser: /scanner/       │              │ Browser: Streamlit :8501  │
- │  JS buffer πλήκτρων      │              │  Dashboard / Ιστορικό /   │
- │  IndexedDB ουρά          │              │  Ρυθμίσεις (st.fragment)  │
- └──────────┬──────────────┘              └────────────┬─────────────┘
-            │ HTTP (batch, idempotent)                  │ HTTP
-            ▼                                           ▼
- ┌───────────────────────────── Server (Windows PC) ─────────────────────┐
- │ FastAPI :8000  ── μοναδικός writer βάσης & Excel, έλεγχος ρόλων       │
- │   ├─ services: scans, catalog, aggregation, transfer, history         │
- │   ├─ SQLite (WAL, synchronous=FULL) — πηγή αλήθειας για scans/ιστορικό │
- │   └─ Excel service (ZIP/XML) — import, ασφαλής μεταφορά, backups       │
- │ Streamlit :8501 ── UI γραμματείας/admin (μιλά με το API)              │
- └───────────────────────────────────────────────────────────────────────┘
+  PC αποθήκης (scanner USB)            PC γραμματείας
+  Browser ─────────────┐               ┌──────────── Browser
+                       ▼               ▼
+        ┌────────── Streamlit Community Cloud ───────────┐
+        │  streamlit_app.py  (ένα deployment)            │
+        │   • σελίδες Streamlit (multipage)              │
+        │   • Custom Component v2: οθόνη σάρωσης (JS)    │
+        │   • app/backend.py: έλεγχος δικαιωμάτων +      │
+        │     επιχειρησιακή λογική (Python)              │
+        └───────┬───────────────────────────┬────────────┘
+                │ SQL (pooler, TLS)         │ REST (service key, μόνο server-side)
+                ▼                           ▼
+     Supabase PostgreSQL            Supabase Storage (PRIVATE bucket)
+     scans, ενεργή λίστα,           original Excel, εκδόσεις working
+     ιστορικό, μεταφορές,           Excel, backups
+     κατάλογος προϊόντων
 ```
 
-**Γιατί ξεχωριστή οθόνη σάρωσης και όχι Streamlit widget;** Ένα Streamlit `text_input` κάνει rerun του Python για κάθε barcode και τρέχει μέσα σε iframe, όπου ούτε η λήψη πλήκτρων ούτε το Fullscreen API είναι αξιόπιστα. Η οθόνη σάρωσης είναι απλή σελίδα HTML/JS που σερβίρεται από το ίδιο σύστημα (FastAPI). Η γραμματεία, το ιστορικό και οι ρυθμίσεις μένουν σε Streamlit.
+* **Ένα deployment**: χωρίς FastAPI, Uvicorn ή άλλο server. Το Supabase χρησιμοποιείται μόνο για αποθήκευση.
+* **Κοινή πηγή αλήθειας** η PostgreSQL. Η αποθήκη και η γραμματεία βλέπουν τα ίδια δεδομένα, και το `st.session_state` δεν χρησιμοποιείται ως βάση.
+* **Credentials μόνο στα Streamlit Secrets.** Ο browser δεν βλέπει ποτέ κλειδιά Supabase. Κρατά μόνο ένα υπογεγραμμένο token ρόλου, για το «Να με θυμάται αυτός ο υπολογιστής».
+* **Δικαιώματα στην Python**: κάθε ενέργεια περνά από το `app/backend.py`, που ελέγχει τον ρόλο (Scanner / Γραμματεία / Admin) ανεξάρτητα από τα κουμπιά.
 
-### Ροή ενός σκαναρίσματος
+### Πώς δουλεύει η σάρωση μέσα στο Streamlit
 
-1. Ο scanner πληκτρολογεί τους χαρακτήρες και στέλνει Enter (ή Tab, αν το ενεργοποιήσετε στις Ρυθμίσεις).
-2. Το JavaScript τους μαζεύει σε buffer. Με τον τερματικό χαρακτήρα δημιουργεί event με **μοναδικό `event_id`** και αύξοντα αριθμό σειράς.
-3. Το event αποθηκεύεται στο **IndexedDB** (`durability: strict`) **πριν** σταλεί.
-4. Αποστολή σε batch στο `POST /api/scans`, με τη σειρά που σκαναρίστηκαν.
-5. Ο server επεξεργάζεται το batch σε **ένα transaction** και απαντά **μόνο μετά το COMMIT**.
-6. Μόνο τότε το event σβήνει από το IndexedDB και η γραμμή γίνεται πράσινη, κίτρινη ή κόκκινη. Μέχρι τότε φαίνεται πορτοκαλί με την ένδειξη «ΕΚΚΡΕΜΕΙ».
-7. Αν αποτύχει η αποστολή, γίνεται επανάληψη με backoff (0.5s → 10s). Η επαναποστολή ίδιου `event_id` **δεν** δημιουργεί δεύτερη καταχώρηση (idempotent API).
+Η οθόνη σάρωσης είναι **Streamlit Custom Component v2**. Τρέχει απευθείας στη σελίδα, χωρίς iframe, με αμφίδρομη επικοινωνία JavaScript ↔ Python:
 
-### Μεταφορά στα «Σβησμένα» — ασφάλεια Excel
+1. Το JavaScript πιάνει τα πλήκτρα του scanner. Με το **Enter** ολοκληρώνεται το barcode.
+2. Δημιουργείται event με **μοναδικό UUID** και αύξοντα αριθμό σειράς.
+3. Το event γράφεται **αμέσως στο IndexedDB** του browser (`durability: strict`).
+4. Τα εκκρεμή στέλνονται στην Python **ομαδικά (batch)** με `setTriggerValue`. Έτσι γίνεται **ένα rerun για πολλά barcode**, όχι ένα ανά barcode, και ποτέ δεν χρησιμοποιείται `st.text_input`.
+5. Η Python τα γράφει στην PostgreSQL σε **ένα transaction** (set-based: ~10 εντολές ανά batch, όσα barcode κι αν έχει).
+6. **Μετά το COMMIT**, τα αποτελέσματα επιστρέφουν στον browser. Μόνο τότε το event σβήνει από το IndexedDB και η γραμμή γίνεται πράσινη/κίτρινη/κόκκινη.
+7. Αν δεν έρθει επιβεβαίωση (χαμένο rerun, διακοπή δικτύου, restart του Cloud, ανανέωση σελίδας), το batch **ξαναστέλνεται**. Η βάση έχει **`UNIQUE(event_id)`**, άρα καμία επαναποστολή δεν δημιουργεί διπλή εγγραφή. Τα αποτελέσματα επαναλαμβάνονται για 2 λεπτά σε κάθε ανανέωση, ώστε να μη χάνονται.
 
-Το πραγματικό workbook έχει ~54.000 τύπους, εξωτερικές αναφορές (`[1]ΣΒΗΣΜΕΝΑ!…`, `[1]!Table4[…]`), form controls (κουμπιά macro), VML, κρυφά φύλλα και autofilters. Η αποθήκευση με `openpyxl` θα έχανε μέρος τους. Γι' αυτό:
+Η λίστα ανανεώνεται κάθε 2 δευτερόλεπτα (`st.fragment(run_every=…)`), ώστε να φαίνονται και οι μεταφορές της γραμματείας. Η ανανέωση αυτή λειτουργεί και ως «heartbeat» για την ένδειξη σύνδεσης.
 
-* Αλλάζουν **μόνο** τα XML των δύο φύλλων (και τα definedNames, όπου χρειάζεται). **Όλα τα άλλα μέρη του αρχείου αντιγράφονται byte-for-byte.** Το `calcChain.xml` αφαιρείται ώστε το Excel να το ξαναχτίσει, που είναι η τυπική και ασφαλής πρακτική.
-* Η γραμμή εντοπίζεται ξανά με **barcode + fingerprint (sha256 στηλών A–K)**, όχι με αποθηκευμένο αριθμό γραμμής. Έτσι, προηγούμενες διαγραφές δεν μπορούν να οδηγήσουν σε αλλαγή λάθος γραμμής.
-* Η γραμμή αντιγράφεται **ολόκληρη** (A–P και πέρα) στην πρώτη κενή γραμμή μετά το τέλος των δεδομένων του `Σβησμενα `. Οι τύποι της προσαρμόζονται όπως στο copy/paste του Excel (`K157` → `K22030`).
-* Από το `΄Ετοιμα προϊόντα` η γραμμή **διαγράφεται** και οι επόμενες ανεβαίνουν. Ενημερώνονται όλοι οι τύποι, το autofilter, το dimension, τα definedNames και οι αναφορές από άλλα φύλλα, όπως στη «Διαγραφή γραμμής» του Excel.
-* Αν η διαγραφή **δεν είναι βέβαιο ότι είναι ασφαλής** (π.χ. κάποιος τύπος δείχνει ακριβώς σε αυτή τη γραμμή, ή υπάρχουν merged cells/πίνακες/conditional formatting στο φύλλο), εφαρμόζεται **ασφαλής εναλλακτική**: η γραμμή αντιγράφεται και η αρχική **καθαρίζεται**, οπότε μένει κενή με τη μορφοποίησή της. Ο χρήστης βλέπει σχετική προειδοποίηση.
-* Πριν από κάθε εγγραφή: **backup**. Το νέο αρχείο γράφεται σε **προσωρινό αρχείο**, επαληθεύεται και αντικαθιστά το working copy **ατομικά** (`os.replace`).
-* **Journal** (`transfer_operations`): στο restart, μια μεταφορά που διακόπηκε ολοκληρώνεται ή ακυρώνεται με σύγκριση sha256.
-* Αν το αρχείο είναι **ανοιχτό στο Excel** (`~$…` lock ή κλειδωμένο), εμφανίζεται κατανοητό μήνυμα και δεν αλλάζει τίποτα.
-* **Ποτέ** δεν εμφανίζεται επιτυχία αν δεν γράφτηκε το Excel. Το διπλό click ή τα ταυτόχρονα requests αποκλείονται με unique index στη βάση.
+### Excel: ακεραιότητα με PostgreSQL + Storage
 
-> Το αρχικό ανεβασμένο αρχείο φυλάσσεται **αναλλοίωτο** (`data/imports/import-NNNNN/original.xlsx`, μόνο για ανάγνωση). Οι μεταφορές γράφονται στο `working.xlsx`, που κατεβάζετε από τις Ρυθμίσεις.
+Ο υπάρχων Excel engine (`app/excel/`) **δεν άλλαξε**. Αλλάζει μόνο το XML των δύο φύλλων και διατηρεί τύπους, εξωτερικές συνδέσεις, κουμπιά macro και κρυφά φύλλα. Επειδή η βάση και το object storage δεν έχουν κοινό atomic transaction:
+
+* Κάθε έκδοση του working Excel είναι **αμετάβλητο αρχείο** (`imports/00001/working/v00002_op000001.xlsx`). Κάθε μεταφορά ανεβάζει **νέα έκδοση** και δεν αντικαθιστά ποτέ την προηγούμενη, που μένει ως backup.
+* Ροή μεταφοράς:
+  1. έλεγχος δικαιωμάτων και μοναδικότητας
+  2. **lease** «excel» στη βάση (μία εγγραφή Excel τη φορά, για όλα τα sessions)
+  3. **journal** `transfer_operations(started)` (unique index ⇒ καμία διπλή μεταφορά)
+  4. κατέβασμα τρέχουσας έκδοσης + έλεγχος sha256
+  5. μετασχηματισμός + επαλήθευση
+  6. ανέβασμα νέας έκδοσης + **ξανακατέβασμα και σύγκριση sha256**
+  7. **ένα** transaction που κάνει compare-and-set του δείκτη έκδοσης (`working_version N → N+1`) και ολοκληρώνει τη μεταφορά, την ενεργή λίστα και το ιστορικό
+* Αν αποτύχει οτιδήποτε πριν από το βήμα 7, ο δείκτης μένει στην παλιά έκδοση: **το Excel δεν άλλαξε** και η μεταφορά καταγράφεται ως αποτυχημένη. Δεν εμφανίζεται ποτέ επιτυχία χωρίς σωστά αποθηκευμένο Excel. Μια μεταφορά που διακόπηκε (restart) ακυρώνεται αυτόματα όταν λήξει το lease.
 
 ---
 
-## 2. Δομή project
+## 2. Ρύθμιση Supabase (μία φορά, ~10 λεπτά)
 
-```
-run.py                     Launcher: ξεκινά FastAPI + Streamlit (python run.py)
-start_windows.bat          Διπλό κλικ για εκκίνηση στα Windows
-requirements.txt           Εξαρτήσεις   (requirements-dev.txt: + pytest, playwright)
-.env.example               Πρότυπο ρυθμίσεων/κωδικών (αντιγράψτε σε .env)
-app/
-  config.py                Ρυθμίσεις από env/.env, ακριβή ονόματα φύλλων
-  timeutil.py              UTC αποθήκευση, εμφάνιση Europe/Athens
-  db/schema.sql            Πίνακες, constraints, indexes
-  db/database.py           SQLite WAL, transactions (BEGIN IMMEDIATE)
-  excel/package.py         Ανάγνωση xlsx (ZIP/XML, shared strings, number formats)
-  excel/reader.py          Επαλήθευση workbook, προϊόντα, fingerprint
-  excel/formula.py         Μετατόπιση αναφορών τύπων (copy / delete row)
-  excel/writer.py          Ασφαλής μεταφορά γραμμής
-  excel/storage.py         Excel storage service (τοπικό· έτοιμο για OneDrive αργότερα)
-  services/normalize.py    Κανονικοποίηση barcode/ομάδων, Decimal κιλά
-  services/catalog.py      Εισαγωγές Excel (εκδόσεις), κατάλογος αναζήτησης
-  services/scans.py        Idempotent επεξεργασία scan events
-  services/aggregation.py  Ενεργή λίστα, SUM ανά Είδος/Πάχος/Διαστάσεις/Πελάτη
-  services/transfer.py     Μεταφορά + journal + recovery, επίλυση αμφίσημων
-  services/history.py      Ιστορικό, φίλτρα, εξαγωγή CSV/XLSX
-  services/settings_service.py, audit.py, errors.py
-  api/main.py              FastAPI endpoints
-  api/auth.py              Ρόλοι, υπογεγραμμένα tokens
-  web/scanner/             Οθόνη σάρωσης (index.html, scanner.js, scanner.css)
-  ui/streamlit_app.py      Streamlit (πλοήγηση/σύνδεση)
-  ui/views/                dashboard.py, history.py, settings.py, scanner.py
-tools/scanner_simulator.py Simulator υψηλής ταχύτητας (API ή πραγματικός browser)
-tests/                     Αυτοματοποιημένες δοκιμές (pytest)
-```
+1. **Δημιουργία project**: https://supabase.com → *New project*.
+   * **Region**: κοντά στο Streamlit Cloud, που τρέχει στις ΗΠΑ. Προτείνεται **East US (N. Virginia)**, για λιγότερη καθυστέρηση ανά σάρωση.
+   * Ορίστε **Database password** και κρατήστε τον.
+2. **Private bucket** για τα Excel: *Storage → New bucket* → όνομα `warehouse-excel` → **Public bucket: OFF** → File size limit 50 MB.
+   (Εναλλακτικά εκτελέστε το `supabase/storage_bucket.sql` στο *SQL Editor*.) Δεν χρειάζονται policies.
+3. **Connection string της βάσης**: πατήστε **Connect** (πάνω στη σελίδα του project) → **Session pooler**. Είναι συμβατό με το IPv4 δίκτυο του Streamlit Cloud. Αντιγράψτε το URI:
+   `postgresql://postgres.<project-ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres`
+   * Αντικαταστήστε `<PASSWORD>` με τον κωδικό της βάσης. Αν περιέχει ειδικούς χαρακτήρες (`@ : / ? #`), γράψτε τους URL-encoded (π.χ. `@` → `%40`).
+   * Προσθέστε στο τέλος `?sslmode=require`.
+   * **Μη** χρησιμοποιήσετε το "Direct connection", που είναι μόνο IPv6.
+4. **Project URL και service key**: *Project Settings → API keys / Data API*:
+   * **Project URL**: `https://<project-ref>.supabase.co`
+   * **service_role** key (ή το νέο **secret** key `sb_secret_…`). ⚠ Μυστικό: μπαίνει **μόνο** στα Streamlit Secrets.
+5. **Πίνακες**: δημιουργούνται **αυτόματα** στην πρώτη εκκίνηση της εφαρμογής, από το `app/db/schema_postgres.sql`.
+   * Το ίδιο script ενεργοποιεί Row Level Security και αφαιρεί κάθε δικαίωμα από τους ρόλους `anon`/`authenticated`, ώστε οι πίνακες να μην είναι προσβάσιμοι από το δημόσιο REST API του Supabase.
+   * Αν προτιμάτε, εκτελέστε το χειροκίνητα στο *SQL Editor*.
 
----
+> Free plan Supabase: ένα project παγώνει μετά από ~1 εβδομάδα **χωρίς καμία χρήση**. Σε κανονική εργασία δεν συμβαίνει. Μετά από μεγάλες αργίες μπορεί να χρειαστεί *Restore project* στο dashboard του Supabase. Για αυτόματα ημερήσια backups της βάσης απαιτείται Pro plan. Τα αρχεία Excel έχουν ήδη όλες τις εκδόσεις στο Storage.
 
-## 3. Εγκατάσταση στα Windows
+## 3. Deployment στο Streamlit Community Cloud
 
-Προϋπόθεση: **Python 3.11 ή νεότερη** από το python.org (στην εγκατάσταση τσεκάρετε *Add python.exe to PATH*).
+1. Ο κώδικας είναι στο GitHub `vstavridis/scan`, στο branch `claude/focused-darwin-fivuu3`. Κάντε merge στο `main` (συνιστάται) ή διαλέξτε απευθείας αυτό το branch στο επόμενο βήμα.
+2. https://share.streamlit.io → **Create app** → *Deploy a public app from GitHub*:
+   * **Repository**: `vstavridis/scan`
+   * **Branch**: `main` (ή το παραπάνω branch)
+   * **Main file path**: `streamlit_app.py`
+   * **App URL**: π.χ. `apothiki-barcode` → `https://apothiki-barcode.streamlit.app`
+3. **Advanced settings**:
+   * **Python version**: 3.12 (δοκιμασμένο και σε 3.13)
+   * **Secrets**: επικολλήστε το περιεχόμενο του `.streamlit/secrets.toml.example` με τις πραγματικές τιμές: connection string, Supabase URL, service key, bucket, `secret_key` και τρεις κωδικούς ρόλων.
+4. **Deploy**. Η πρώτη εκκίνηση εγκαθιστά τα `requirements.txt` (~2–3 λεπτά) και δημιουργεί τους πίνακες.
+5. Αν κάτι λείπει από τα Secrets, η εφαρμογή εμφανίζει σελίδα «απαιτείται ρύθμιση» με το τι ακριβώς λείπει. Τα logs: *Manage app → Logs*.
 
-Ανοίξτε **PowerShell** στον φάκελο του project:
-
-```powershell
-git clone https://github.com/vstavridis/scan.git
-cd scan
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-copy .env.example .env
-notepad .env
-```
-
-Στο `.env` ορίστε **ισχυρούς κωδικούς** για τους τρεις ρόλους:
-
-| Ρόλος | Μεταβλητή | Τι μπορεί να κάνει |
-|---|---|---|
-| Αποθήκη (Scanner) | `APP_SCANNER_PASSWORD` | Σάρωση και προβολή ενεργής λίστας |
-| Γραμματεία | `APP_SECRETARY_PASSWORD` | Dashboard, ιστορικό, μεταφορά, επίλυση αμφίσημων, αφαίρεση από λίστα |
-| Διαχειριστής | `APP_ADMIN_PASSWORD` | Όλα + ανέβασμα Excel, ρυθμίσεις, λήψεις/backups |
-
-> Αν το PowerShell δεν επιτρέπει το `Activate.ps1`, τρέξτε μία φορά: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
-
-## 4. Εκκίνηση
-
-```powershell
-python run.py
-```
-
-(ή διπλό κλικ στο `start_windows.bat`). Ο launcher ξεκινά και τις δύο υπηρεσίες, τις επανεκκινεί αυτόματα αν σταματήσουν, και τυπώνει τις διευθύνσεις:
-
-```
-  Οθόνη σάρωσης (αποθήκη):    http://192.168.1.50:8000/scanner/
-  Γραμματεία / Ρυθμίσεις:     http://192.168.1.50:8501
-```
-
-### Διευθύνσεις
-
-| Ποιος | Διεύθυνση |
-|---|---|
-| **Υπάλληλος αποθήκης** (PC με τον δέκτη του scanner) | `http://<IP-server>:8000/scanner/` |
-| **Γραμματεία** | `http://<IP-server>:8501` → σύνδεση ως «Γραμματεία» |
-| **Admin** (πρώτη φορά: ανέβασμα Excel) | `http://<IP-server>:8501` → σύνδεση ως «Διαχειριστής» → **Ρυθμίσεις** |
-| Στον ίδιο τον server | `http://localhost:8000/scanner/` και `http://localhost:8501` |
+**Ορατότητα**: με *Sharing → Public*, οποιοσδήποτε έχει το link βλέπει τη σελίδα σύνδεσης, και οι κωδικοί ρόλων προστατεύουν τα δεδομένα. Για επιπλέον προστασία ορίστε την εφαρμογή **Private** και προσκαλέστε τα email των χρηστών. Σε αυτή την περίπτωση κάθε χρήστης συνδέεται πρώτα με λογαριασμό Google/GitHub.
 
 ### Πρώτη χρήση
 
-1. Admin → **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
-2. Στο PC αποθήκης ανοίξτε την οθόνη σάρωσης, συνδεθείτε με τον κωδικό Scanner (η σύνδεση κρατά 30 ημέρες), πατήστε **Πλήρης Οθόνη** (ή F9) και **Δοκιμή ήχου**.
-3. Σκανάρετε. Χωρίς ποντίκι: η σελίδα «ακούει» το πληκτρολόγιο σε όλη την οθόνη. Αν χαθεί η εστίαση (π.χ. άνοιξε άλλο παράθυρο), εμφανίζεται κόκκινη ένδειξη «κάντε κλικ εδώ».
+1. **Admin**: ανοίξτε το URL → Ρόλος «Διαχειριστής» → **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
+2. **Αποθήκη** (PC με τον δέκτη): ανοίξτε το ίδιο URL → Ρόλος «Αποθήκη (Scanner)» → τσεκαρισμένο «Να με θυμάται» → **Πλήρης Οθόνη** (ή F9) → **Δοκιμή ήχου** → σκανάρετε.
+3. **Γραμματεία**: ίδιο URL → Ρόλος «Γραμματεία» → Dashboard.
 
-### Δεύτερος υπολογιστής στο LAN
-
-* Ο server πρέπει να είναι προσβάσιμος: στο **Τείχος προστασίας των Windows** επιτρέψτε το Python για **Ιδιωτικά δίκτυα** (εμφανίζεται ερώτηση στην πρώτη εκκίνηση) ή ανοίξτε τις θύρες TCP **8000** και **8501**:
-  ```powershell
-  New-NetFirewallRule -DisplayName "Apothiki 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private
-  New-NetFirewallRule -DisplayName "Apothiki 8501" -Direction Inbound -Protocol TCP -LocalPort 8501 -Action Allow -Profile Private
-  ```
-* Δώστε στον server **σταθερή IP** (ρύθμιση στο router/DHCP reservation), ώστε οι διευθύνσεις να μην αλλάζουν.
-* Ο server δεν πρέπει να μπαίνει σε αναστολή λειτουργίας (Ρυθμίσεις ενέργειας → «Ποτέ»).
-
-### Αυτόματη εκκίνηση με τα Windows (προαιρετικό)
-
-Task Scheduler → *Create Task* → Trigger: *At log on* → Action: `C:\…\scan\start_windows.bat`, Start in: `C:\…\scan`.
-
-### Μόνιμα δεδομένα
-
-Όλα βρίσκονται στο `data/` (ρυθμίζεται με `APP_DATA_DIR`) και **παραμένουν μετά από restart**:
-
-```
-data/warehouse.sqlite3      βάση (scans, ιστορικό, ενεργή λίστα, μεταφορές, audit)
-data/imports/import-00001/  original.xlsx (αναλλοίωτο) + working.xlsx (ενημερωμένο)
-data/backups/               αντίγραφα πριν από κάθε μεταφορά/νέα εισαγωγή
-data/logs/                  αρχεία καταγραφής
-```
-
-**Συστήνεται** τακτικό αντίγραφο του φακέλου `data/` σε εξωτερικό δίσκο. Ο φάκελος **δεν** ανεβαίνει στο GitHub.
+| Ποιος | Διεύθυνση | Ρόλος |
+|---|---|---|
+| Υπάλληλος αποθήκης | `https://<app>.streamlit.app` | Αποθήκη (Scanner) |
+| Γραμματεία | `https://<app>.streamlit.app` | Γραμματεία |
+| Διαχειριστής | `https://<app>.streamlit.app` → Ρυθμίσεις | Διαχειριστής |
 
 ---
 
-## 5. GitHub
+## 4. Δοκιμές
 
-* Στο repository ανεβαίνει **μόνο κώδικας**. Το `.gitignore` εξαιρεί `.env`, `data/`, `*.xlsx`, βάσεις και backups.
-* Ενημέρωση του server με νέα έκδοση κώδικα:
-  ```powershell
-  git pull
-  .\.venv\Scripts\Activate.ps1
-  pip install -r requirements.txt
-  python run.py
-  ```
-  Η βάση αναβαθμίζεται αυτόματα (`CREATE TABLE IF NOT EXISTS`). Τα δεδομένα στο `data/` δεν επηρεάζονται.
+Τρέχουν σε αντίγραφα δεδομένων. Το αρχικό αρχείο δοκιμής δεν τροποποιείται ποτέ (έλεγχος sha256).
 
----
-
-## 6. Δοκιμές
-
-```powershell
+```bash
 pip install -r requirements-dev.txt
-python -m playwright install chromium     # μόνο για τις δοκιμές σε browser
-python -m pytest                          # όλες
-python -m pytest -m "not slow"            # γρήγορες
+```
+```bash
+python -m playwright install chromium
+```
+```bash
+python -m pytest
 ```
 
-* Οι δοκιμές δουλεύουν πάντα σε **αντίγραφο** δεδομένων, σε προσωρινό φάκελο, και ελέγχουν με sha256 ότι το αρχικό αρχείο **δεν άλλαξε**.
-* Χρησιμοποιούν ένα **συνθετικό workbook** με την ίδια δομή, που φτιάχνεται αυτόματα (`tests/fixtures/make_fixture.py`), ώστε να μη χρειάζεται production Excel στο repo.
-* Για δοκιμές και στο **πραγματικό αρχείο**: αντιγράψτε το στο `tests/fixtures/local/` (εξαιρείται από το git) ή ορίστε `WAREHOUSE_REAL_XLSX=C:\…\Σχισμενα (1).xlsx`.
-* Τα tests με LibreOffice παραλείπονται αν δεν είναι εγκατεστημένο.
+* Χωρίς ρυθμίσεις, τα tests χρησιμοποιούν **SQLite + τοπικό φάκελο**. Η SQLite επιτρέπεται **μόνο** για τοπικά tests και όχι στο Cloud.
+* Με `WAREHOUSE_TEST_PG=postgresql://postgres@localhost:5432/postgres`, όλα τα tests του backend τρέχουν **και σε πραγματική PostgreSQL** (δημιουργείται προσωρινή βάση ανά test).
+* Πραγματικό αρχείο: αντιγράψτε το στο `tests/fixtures/local/`, που εξαιρείται από το git.
+* `tools/scanner_simulator.py`: προσομοίωση scanner υψηλής ταχύτητας. Σε `--mode browser` πληκτρολογεί barcode στην πραγματική εφαρμογή, και δέχεται και URL του Streamlit Cloud. Χρησιμοποιήστε δοκιμαστικό Supabase project.
 
-### Scanner simulator
+## 5. Δομή project
 
-Χρησιμοποιήστε ξεχωριστό φάκελο δεδομένων, γιατί ο simulator καταχωρεί πραγματικά σκαναρίσματα:
-
-```powershell
-$env:APP_DATA_DIR="data-test"; python run.py
-# σε άλλο παράθυρο:
-python tools/scanner_simulator.py --password <SCANNER_PW> --lookup-password <ΓΡΑΜΜΑΤΕΙΑ_PW> --count 300 --rate 20
-python tools/scanner_simulator.py --mode browser --password <SCANNER_PW> --lookup-password <ΓΡΑΜΜΑΤΕΙΑ_PW> --count 100 --rate 15 --headed
+```
+streamlit_app.py              entrypoint (Streamlit Cloud)
+requirements.txt              εξαρτήσεις (δοκιμασμένες εκδόσεις)
+.streamlit/config.toml        ρυθμίσεις Streamlit
+.streamlit/secrets.toml.example  πρότυπο Secrets (χωρίς πραγματικούς κωδικούς)
+supabase/storage_bucket.sql   δημιουργία private bucket
+app/backend.py                ενέργειες UI + έλεγχος δικαιωμάτων
+app/auth.py                   ρόλοι, υπογεγραμμένα tokens
+app/config.py                 ρυθμίσεις από Secrets/env
+app/storage.py                Supabase Storage (REST) / τοπικός φάκελος για tests
+app/db/                       σύνδεση PostgreSQL/SQLite, σχήματα (schema_postgres.sql)
+app/excel/                    Excel engine (ανάγνωση, ασφαλής μεταφορά, τύποι) — αμετάβλητος
+app/services/                 scans, catalog, aggregation, transfer, history, locks, settings
+app/ui/components/            Custom Component v2: οθόνη σάρωσης (assets/*.js|css|html), auth bridge
+app/ui/views/                 σελίδες: dashboard, scanner, history, settings
+tests/                        pytest (backend σε SQLite+PostgreSQL, Excel, Supabase client, Streamlit+Chromium)
+tools/scanner_simulator.py    simulator υψηλής ταχύτητας
 ```
 
-Ο simulator αναφέρει ρυθμό, καθυστερήσεις (median/p95), αποτελέσματα και αν χάθηκε κάποιο event.
+## 6. Περιορισμοί και τι μένει να ελεγχθεί στην πράξη
 
----
+* **Πλήρης οθόνη στο Streamlit Cloud**: το Cloud εμφανίζει την εφαρμογή μέσα στο δικό του πλαίσιο. Αν ο browser δεν επιτρέψει το Fullscreen API εκεί, η οθόνη σάρωσης περνά σε λειτουργία «kiosk» (καλύπτει όλο το παράθυρο) και προτείνει **F11**. Ελέγξτε το στο πραγματικό URL.
+* **Αδράνεια εφαρμογής**: το Community Cloud κοιμίζει εφαρμογές χωρίς επισκέψεις για αρκετές ώρες. Η πρώτη επίσκεψη μετά δείχνει κουμπί «Yes, get this app back up!», και η επανεκκίνηση παίρνει ~1 λεπτό. Τα δεδομένα δεν χάνονται (Supabase). Μια ανοιχτή καρτέλα σάρωσης κρατά την εφαρμογή ενεργή.
+* **Επανεκκίνηση/redeploy ενώ σκανάρετε**: τα barcode μένουν στο IndexedDB και στέλνονται όταν επανέλθει η σύνδεση (δοκιμασμένο). Αν η σελίδα κλείσει ή ανανεωθεί **όσο ο server είναι εκτός**, δεν μπορεί να ξαναφορτώσει μέχρι να επανέλθει. Τα barcode όμως μένουν στο IndexedDB και στέλνονται μετά. Δεν υπάρχει εγγύηση αν διαγραφούν τα δεδομένα του browser ή χαλάσει η συσκευή.
+* **Ταχύτητα**: μετρήθηκε σε Chromium με τοπικό server, με και χωρίς τεχνητή καθυστέρηση βάσης (βλ. παρακάτω). Στο Cloud εξαρτάται από τη διαδρομή browser → Streamlit Cloud → Supabase. Μετρήστε με `tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app` και με τον πραγματικό scanner.
+* **Φυσικός scanner**: πρέπει να ελεγχθούν ο τερματικός χαρακτήρας (Enter/Tab), τυχόν prefix/suffix και η ελληνική διάταξη πληκτρολογίου.
+* **Supabase free plan**: όρια μεγέθους (500 MB βάση, 1 GB storage, 50 MB/αρχείο), παύση μετά από ~1 εβδομάδα αδράνειας, χωρίς αυτόματα backups βάσης.
 
-## 7. Χρήσιμες λεπτομέρειες
+### Μετρήσεις (τοπικά, Chromium + Streamlit + PostgreSQL 16)
 
-* **Ελληνική διάταξη πληκτρολογίου**: με ενεργά τα ελληνικά, ένας scanner που «πατά» `V` δίνει `Ω`. Η οθόνη σάρωσης διαβάζει το **φυσικό πλήκτρο**, οπότε το barcode καταγράφεται σωστά (Ρυθμίσεις → «Ανάγνωση πλήκτρων»).
-* **Διπλό σκανάρισμα**: καταγράφεται στο ιστορικό, δίνει κίτρινο χρώμα και διπλό ήχο, και **δεν** προσθέτει κιλά.
-* **Αμφίσημο barcode** (π.χ. `EX434-1` σε 2 γραμμές): κόκκινο στην αποθήκη. Η γραμματεία βλέπει τις πιθανές γραμμές και επιλέγει τη σωστή. Μέχρι τότε δεν μετρά κιλά και δεν μεταφέρεται.
-* **Ομαδοποίηση**: Είδος + Πάχος + Διαστάσεις + Πελάτης. Η κανονικοποίηση (κεφαλαία, τόνοι, κενά, `0.7`=`0.70`, λατινικό `X`=ελληνικό `Χ`) χρησιμοποιείται μόνο για σύγκριση. Η εμφάνιση κρατά τις αρχικές τιμές.
-* **Κιλά**: πάντα `Decimal`, ποτέ float.
-* **Νέο Excel ενώ υπάρχει ενεργή λίστα**: απαιτεί ρητή επιβεβαίωση. Πρώτα παίρνει backup του working Excel και της βάσης, και μετά αντιστοιχίζει ξανά την ενεργή λίστα στο νέο αρχείο. Το ιστορικό και οι προηγούμενες εισαγωγές μένουν.
-
-## 8. Περιορισμοί και τι μένει να δοκιμαστεί στην πράξη
-
-* **Φυσικός scanner**: η λήψη έχει δοκιμαστεί με προσομοίωση πληκτρολογίου σε Chromium (150 barcode, ~30/s), όχι με τον πραγματικό δέκτη. Πρέπει να ελεγχθεί:
-  ο τερματικός χαρακτήρας (Enter/Tab), η ταχύτητα πληκτρολόγησης του δέκτη, τυχόν prefix/suffix που στέλνει, και η συμπεριφορά με ελληνική διάταξη.
-* **Δύο PC σε LAN**: έχει δοκιμαστεί με δύο ταυτόχρονες συνεδρίες browser στον ίδιο υπολογιστή. Πρέπει να ελεγχθούν το firewall και η καθυστέρηση του πραγματικού δικτύου.
-* **Ήχοι**: παράγονται με Web Audio. Ο browser επιτρέπει ήχο μόνο μετά από αλληλεπίδραση· το πρώτο πλήκτρο του scanner ή ένα κλικ τον ενεργοποιεί. Ελέγξτε την ένταση των ηχείων.
-* **Η σύνδεση στο Streamlit κρατιέται ανά καρτέλα**: αν ανανεωθεί η σελίδα της γραμματείας, ζητείται ξανά κωδικός. Η οθόνη σάρωσης θυμάται τη σύνδεση (30 ημέρες).
-* **Ανανέωση σελίδας σάρωσης χωρίς server**: τα εκκρεμή barcode επιβιώνουν στο IndexedDB, αλλά η σελίδα χρειάζεται τον server για να φορτώσει ξανά. **Όσο δεν υπάρχει σύνδεση, μην κλείνετε/ανανεώνετε τη σελίδα.** Συνεχίστε να σκανάρετε· όλα στέλνονται όταν επανέλθει. Η διατήρηση δεν είναι εγγυημένη αν διαγραφούν τα δεδομένα του browser ή χαλάσει η συσκευή.
-* **Excel ανοιχτό σε άλλο PC**: αν το `working.xlsx` είναι ανοιχτό στο Excel, η μεταφορά αρνείται με μήνυμα. Δουλεύετε πάνω στο αρχείο που κατεβάζετε από τις Ρυθμίσεις, όχι απευθείας στον φάκελο `data/`.
-* **Υπολογισμός τύπων**: οι cached τιμές των τύπων αντιγράφονται. Το Excel ξαναϋπολογίζει κατά το άνοιγμα (το workbook έχει `updateLinks="always"`, άρα θα ζητήσει ενημέρωση των εξωτερικών συνδέσεων όπως και σήμερα).
-* **Ασφάλεια**: απλή προστασία με κωδικούς ρόλων και υπογεγραμμένα tokens, μέσω HTTP στο LAN (όχι HTTPS). Κατάλληλο για κλειστό τοπικό δίκτυο, όχι για έκθεση στο internet.
+| Σενάριο | Αποτέλεσμα |
+|---|---|
+| 150 barcode, ~2 ms/χαρακτήρα | όλα επιβεβαιωμένα σε ~8,4 s ≈ **18 barcode/s**, 0 επαναποστολές, 0 διπλές εγγραφές |
+| Ίδιο, με +60 ms καθυστέρηση σε κάθε σύνδεση βάσης | ≈ **19 barcode/s** (το batching απορροφά την καθυστέρηση) |
+| Εμφάνιση νέου scan στη γραμματεία | ~1–2 s |

@@ -7,8 +7,9 @@ import pandas as pd
 import streamlit as st
 
 from app.timeutil import local_tz
-from app.ui.api_client import ApiError
-from app.ui.common import client, handle_api_error, require
+from app import backend
+from app.services.errors import ServiceError
+from app.ui.common import principal, require, show_error
 
 RESULTS = {"": "Όλα", "ok": "Επιτυχές", "duplicate": "Διπλό", "unknown": "Άγνωστο", "ambiguous": "Αμφίσημο",
            "no_catalog": "Χωρίς ενεργό Excel", "invalid": "Μη έγκυρο"}
@@ -42,20 +43,17 @@ def page() -> None:
         d_to = dates[1] if len(dates) > 1 else d_from
     else:
         d_from = d_to = dates
-    params = {k: v for k, v in {
-        "date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None,
-        "barcode": barcode or None, "customer": customer or None, "result": result or None,
-        "transfer_status": tstatus or None,
-    }.items() if v}
     try:
-        rows = client().get("/api/history", params=params, timeout=30)
-    except ApiError as exc:
-        handle_api_error(exc)
+        rows = backend.history_rows(principal(), date_from=d_from, date_to=d_to, barcode=barcode or None,
+                                    customer=customer or None, result=result or None,
+                                    transfer_status=tstatus or None)
+    except ServiceError as exc:
+        show_error(exc)
         return
     st.write(f"**{len(rows)}** εγγραφές")
     if rows:
         df = pd.DataFrame(rows)[list(COLUMNS)].rename(columns=COLUMNS)
-        st.dataframe(df, hide_index=True, use_container_width=True, height=560)
+        st.dataframe(df, hide_index=True, width="stretch", height=560)
 
     c1, c2, _ = st.columns([1, 1, 3])
     for col, fmt, label, mime in (
@@ -65,9 +63,9 @@ def page() -> None:
         key = f"hist_export_{fmt}"
         if col.button(f"Προετοιμασία εξαγωγής {label}", key=f"prep_{fmt}"):
             try:
-                st.session_state[key] = client().get("/api/history/export", params={**params, "fmt": fmt}, raw=True)
-            except ApiError as exc:
-                handle_api_error(exc)
+                st.session_state[key] = backend.history_export(principal(), rows, fmt)
+            except ServiceError as exc:
+                show_error(exc)
         if st.session_state.get(key):
             col.download_button(f"⬇ Λήψη {label}", st.session_state[key],
                                 file_name=f"istoriko_{today:%Y%m%d}.{fmt}", mime=mime, key=f"dl_{fmt}")

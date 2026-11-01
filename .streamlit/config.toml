@@ -1,14 +1,14 @@
 [server]
 headless = true
 fileWatcherType = "none"
-maxUploadSize = 200
+maxUploadSize = 50          # MB — όριο αρχείου Excel (όσο και το Supabase Storage free plan)
 
 [browser]
 gatherUsageStats = false
 
+[client]
+toolbarMode = "minimal"
+
 [theme]
 base = "light"
 primaryColor = "#15803d"
-
-[client]
-toolbarMode = "minimal"

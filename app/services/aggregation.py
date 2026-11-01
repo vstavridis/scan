@@ -2,18 +2,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Iterable
 
-from app.db.database import connect, get_version
+from app.db.database import Conn, connect, get_version, snapshot
 from app.services.normalize import format_kilos, group_key, parse_kilos, product_display, product_label
 
 STATE_LABELS = {"ok": "Ενεργό", "ambiguous": "Αμφίσημο barcode", "unknown": "Άγνωστο barcode"}
 
 
-def active_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def active_items(conn: Conn) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT a.id, a.barcode, a.barcode_norm, a.state, a.product_record_id, a.duplicate_count, a.created_at,
                   a.import_id, p.eidos, p.paxos, p.diastaseis, p.temaxia, p.kila, p.pelatis, p.vspg, p.topothesia,
@@ -95,33 +94,25 @@ def totals(items: list[dict[str, Any]], groups: list[dict[str, Any]]) -> dict[st
 def dashboard_snapshot() -> dict[str, Any]:
     from app.services import catalog
 
-    with connect() as conn:
-        conn.execute("BEGIN")  # συνεπές στιγμιότυπο (WAL snapshot)
-        try:
-            version = get_version(conn)
-            items = active_items(conn)
-            imp = catalog.active_import(conn)
-        finally:
-            conn.execute("COMMIT")
+    with snapshot() as conn:  # συνεπές στιγμιότυπο
+        version = get_version(conn)
+        items = active_items(conn)
+        imp = catalog.active_import(conn)
     groups = aggregate(items)
     return {"version": version, "items": items, "groups": groups, "totals": totals(items, groups), "import": imp}
 
 
 def scanner_snapshot() -> dict[str, Any]:
     """Ελαφριά εκδοχή για την οθόνη αποθήκης."""
-    with connect() as conn:
-        conn.execute("BEGIN")
-        try:
-            version = get_version(conn)
-            rows = conn.execute(
-                """SELECT a.id, a.barcode, a.state, a.duplicate_count, a.created_at,
-                          p.eidos, p.paxos, p.diastaseis, p.kila, p.pelatis
-                   FROM active_items a LEFT JOIN product_records p ON p.id = a.product_record_id
-                   WHERE a.status='active' ORDER BY a.id"""
-            ).fetchall()
-            has_catalog = conn.execute("SELECT 1 FROM excel_imports WHERE is_active=1").fetchone() is not None
-        finally:
-            conn.execute("COMMIT")
+    with snapshot() as conn:
+        version = get_version(conn)
+        rows = conn.execute(
+            """SELECT a.id, a.barcode, a.state, a.duplicate_count, a.created_at,
+                      p.eidos, p.paxos, p.diastaseis, p.kila, p.pelatis
+               FROM active_items a LEFT JOIN product_records p ON p.id = a.product_record_id
+               WHERE a.status='active' ORDER BY a.id"""
+        ).fetchall()
+        has_catalog = conn.execute("SELECT 1 AS x FROM excel_imports WHERE is_active=1").fetchone() is not None
     items = []
     for r in rows:
         items.append({

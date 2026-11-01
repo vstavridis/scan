@@ -1,14 +1,13 @@
 """Ρυθμίσεις (μόνο Admin): ανέβασμα/έλεγχος/ενεργοποίηση Excel, λήψεις, backups, ρυθμίσεις scanner."""
 from __future__ import annotations
 
-from urllib.parse import quote
-
 import pandas as pd
 import streamlit as st
 
 from app.timeutil import fmt_local
-from app.ui.api_client import ApiError
-from app.ui.common import client, handle_api_error, require
+from app import backend
+from app.services.errors import ServiceError
+from app.ui.common import principal, require, show_error
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -25,7 +24,8 @@ def _active_import_box(imports: list[dict]) -> None:
     c[2].metric("Import ID", f"#{active['id']}")
     c[3].metric("Προϊόντα", active["product_count"])
     st.caption(f"Μοναδικά barcode: {active['unique_barcodes']} · Διπλά barcode στο Excel: {active['duplicate_barcodes']} · "
-               f"Εισαγωγή από: {active['imported_by']}")
+               f"Εισαγωγή από: {active['imported_by']} · Τρέχουσα έκδοση working Excel: v{active['working_version']} "
+               f"(κάθε μεταφορά δημιουργεί νέα έκδοση· οι προηγούμενες μένουν ως backups)")
 
 
 def _report(rep: dict) -> None:
@@ -54,19 +54,18 @@ def _report(rep: dict) -> None:
             "row": "Γραμμή", "barcode": "BARCODE", "eidos": "ΕΙΔΟΣ", "paxos": "ΠΑΧΟΣ", "diastaseis": "ΔΙΑΣΤΑΣΕΙΣ",
             "temaxia": "ΤΕΜΑΧΙΑ", "kila": "ΚΙΛΑ", "pelatis": "ΠΕΛΑΤΗΣ", "vspg": "VS/PG", "topothesia": "ΤΟΠΟΘΕΣΙΑ",
             "thesi": "ΘΕΣΗ", "rolo": "ΡΟΛΟ"})
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, width="stretch")
 
 
-def _upload_section(api) -> None:
+def _upload_section() -> None:
     st.subheader("Ανέβασμα νέου Excel")
     up = st.file_uploader("Αρχείο .xlsx", type=["xlsx"], accept_multiple_files=False)
     if up is not None and st.button("Έλεγχος αρχείου", type="primary"):
-        with st.spinner("Αποθήκευση και έλεγχος…"):
+        with st.spinner("Έλεγχος και αποθήκευση στο Supabase Storage…"):
             try:
-                res = api.post(f"/api/admin/imports/stage?filename={quote(up.name)}", content=up.getvalue(), timeout=180)
-                st.session_state["staged"] = res
-            except ApiError as exc:
-                handle_api_error(exc)
+                st.session_state["staged"] = backend.stage_excel(principal(), up.name, up.getvalue())
+            except ServiceError as exc:
+                show_error(exc)
     staged = st.session_state.get("staged")
     if not staged:
         return
@@ -76,67 +75,67 @@ def _upload_section(api) -> None:
         return
     confirm = st.checkbox(
         "Επιβεβαιώνω την αντικατάσταση του ενεργού Excel. Αν υπάρχουν ενεργά barcode στη λίστα, θα αντιστοιχιστούν "
-        "ξανά στο νέο αρχείο (δημιουργείται αντίγραφο ασφαλείας πριν την αλλαγή).", key="confirm_replace")
+        "ξανά στο νέο αρχείο (η προηγούμενη έκδοση του Excel μένει αποθηκευμένη ως backup).", key="confirm_replace")
     if st.button("Ενεργοποίηση αρχείου", type="primary"):
         try:
             with st.spinner("Ενεργοποίηση…"):
-                res = api.post("/api/admin/imports/activate",
-                               json={"staging_id": staged["staging_id"], "confirm_replace": confirm}, timeout=300)
+                res = backend.activate_excel(principal(), staged["staging_id"], confirm)
             st.session_state.pop("staged", None)
             st.success(f"✔ Ενεργοποιήθηκε η εισαγωγή #{res['import_id']} ({res['filename']}). "
                        f"Αντιστοίχιση ενεργής λίστας: {res['remapped']}")
             if res.get("backups"):
-                st.info("Αντίγραφα ασφαλείας: " + ", ".join(b.split('/')[-1].split('\\')[-1] for b in res["backups"]))
-        except ApiError as exc:
+                st.info("Η προηγούμενη έκδοση παραμένει ως backup: " + ", ".join(res["backups"]))
+        except ServiceError as exc:
             if exc.code == "confirmation_required":
                 st.warning(exc.message + " Τσεκάρετε την επιβεβαίωση και πατήστε ξανά «Ενεργοποίηση».")
             else:
-                handle_api_error(exc)
+                show_error(exc)
 
 
-def _downloads(api) -> None:
+def _downloads() -> None:
     st.subheader("Λήψεις και αντίγραφα ασφαλείας")
+    p = principal()
     c1, c2 = st.columns(2)
     if c1.button("Προετοιμασία τρέχοντος ενημερωμένου Excel"):
         try:
-            st.session_state["working_xlsx"] = api.get("/api/admin/download/working", raw=True, timeout=120)
-        except ApiError as exc:
-            handle_api_error(exc)
+            st.session_state["working_xlsx"] = backend.working_excel(p)
+        except ServiceError as exc:
+            show_error(exc)
     if st.session_state.get("working_xlsx"):
-        c1.download_button("⬇ Λήψη ενημερωμένου Excel", st.session_state["working_xlsx"],
-                           file_name="enimeromeno.xlsx", mime=XLSX_MIME)
+        name, data = st.session_state["working_xlsx"]
+        c1.download_button("⬇ Λήψη ενημερωμένου Excel", data, file_name=name, mime=XLSX_MIME)
     if c2.button("Δημιουργία αντιγράφου ασφαλείας τώρα"):
         try:
-            res = api.post("/api/admin/backups")
-            c2.success(f"Δημιουργήθηκε: {res['name']}")
-        except ApiError as exc:
-            handle_api_error(exc)
+            c2.success(f"Δημιουργήθηκε: {backend.make_backup(p)}")
+        except ServiceError as exc:
+            show_error(exc)
     try:
-        backups = api.get("/api/admin/backups")
-    except ApiError as exc:
-        handle_api_error(exc)
+        backups = backend.backups(p)
+    except ServiceError as exc:
+        show_error(exc)
         return
     if backups:
-        with st.expander(f"Αντίγραφα ασφαλείας ({len(backups)})"):
-            names = [b["name"] for b in backups]
-            sel = st.selectbox("Επιλογή αντιγράφου", names,
-                               format_func=lambda n: f"{n}  ({next(b for b in backups if b['name']==n)['modified']})")
-            if st.button("Προετοιμασία λήψης αντιγράφου"):
+        with st.expander(f"Αποθηκευμένα αρχεία / backups ({len(backups)})"):
+            st.dataframe(pd.DataFrame([{"Αρχείο": b["path"], "Είδος": b["kind"], "Μέγεθος (KB)": round(b["size"] / 1024),
+                                        "Ενημέρωση": b["updated_at"][:19].replace("T", " ")} for b in backups]),
+                         hide_index=True, width="stretch")
+            sel = st.selectbox("Επιλογή αρχείου για λήψη", [b["path"] for b in backups])
+            if st.button("Προετοιμασία λήψης"):
                 try:
-                    st.session_state["backup_dl"] = (sel, api.get(f"/api/admin/backups/{quote(sel)}", raw=True, timeout=120))
-                except ApiError as exc:
-                    handle_api_error(exc)
+                    st.session_state["backup_dl"] = (sel, backend.backup_bytes(p, sel))
+                except ServiceError as exc:
+                    show_error(exc)
             if st.session_state.get("backup_dl"):
                 name, data = st.session_state["backup_dl"]
-                st.download_button(f"⬇ {name}", data, file_name=name)
+                st.download_button(f"⬇ {name}", data, file_name=name.replace("/", "_"), mime=XLSX_MIME)
 
 
-def _scanner_settings(api) -> None:
+def _scanner_settings() -> None:
     st.subheader("Ρυθμίσεις σάρωσης και μεταφοράς")
     try:
-        cfg = api.get("/api/admin/settings")
-    except ApiError as exc:
-        handle_api_error(exc)
+        cfg = backend.get_settings_values(principal())
+    except ServiceError as exc:
+        show_error(exc)
         return
     with st.form("cfg"):
         term = st.radio("Τερματικός χαρακτήρας scanner", ["enter", "enter_tab"],
@@ -149,7 +148,9 @@ def _scanner_settings(api) -> None:
         sound = st.checkbox("Ήχος ενεργός από προεπιλογή", value=cfg["scanner_sound_default"])
         gap = st.number_input("Μέγιστο κενό μεταξύ πλήκτρων (ms, 0 = χωρίς όριο)", 0, 5000,
                               int(cfg["scanner_inter_key_timeout_ms"]), step=50)
-        refresh = st.number_input("Ανανέωση dashboard (δευτερόλεπτα)", 0.2, 60.0, float(cfg["dashboard_refresh_seconds"]), step=0.5)
+        refresh = st.number_input("Ανανέωση dashboard (δευτερόλεπτα)", 0.5, 60.0, float(cfg["dashboard_refresh_seconds"]), step=0.5)
+        srefresh = st.number_input("Ανανέωση λίστας στην οθόνη σάρωσης (δευτερόλεπτα)", 0.5, 60.0,
+                                   float(cfg["scanner_refresh_seconds"]), step=0.5)
         mode = st.selectbox("Τρόπος αφαίρεσης από «Έτοιμα προϊόντα»", ["auto", "shift", "clear"],
                             index=["auto", "shift", "clear"].index(cfg["transfer_mode"]),
                             format_func=lambda v: {
@@ -158,44 +159,48 @@ def _scanner_settings(api) -> None:
                                 "clear": "Μόνο καθαρισμός γραμμής (η γραμμή μένει κενή)"}[v])
         if st.form_submit_button("Αποθήκευση ρυθμίσεων", type="primary"):
             try:
-                api.put("/api/admin/settings", json={
+                backend.update_settings(principal(), {
                     "scanner_terminator": term, "scanner_key_mapping": mapping, "scanner_sound_default": sound,
                     "scanner_inter_key_timeout_ms": int(gap), "dashboard_refresh_seconds": float(refresh),
-                    "transfer_mode": mode})
-                st.session_state["dash_refresh"] = float(refresh)
-                st.success("Οι ρυθμίσεις αποθηκεύτηκαν. Η οθόνη σάρωσης τις παίρνει αυτόματα μέσα σε 30 δευτ. (ή με ανανέωση).")
-            except ApiError as exc:
-                handle_api_error(exc)
+                    "scanner_refresh_seconds": float(srefresh), "transfer_mode": mode})
+                st.success("Οι ρυθμίσεις αποθηκεύτηκαν. Οι οθόνες τις παίρνουν με την επόμενη ανανέωση σελίδας.")
+            except ServiceError as exc:
+                show_error(exc)
 
 
 def page() -> None:
     if not require("admin"):
         return
     st.title("Ρυθμίσεις")
-    api = client()
+    p = principal()
     try:
-        imports = api.get("/api/admin/imports")
-    except ApiError as exc:
-        handle_api_error(exc)
+        health = backend.health()
+        imports = backend.imports(p)
+    except ServiceError as exc:
+        show_error(exc)
         return
+    for problem in health["problems"]:
+        st.error(problem)
+    st.caption(f"Βάση δεδομένων: {health['database']}")
     _active_import_box(imports)
     st.divider()
-    _upload_section(api)
+    _upload_section()
     st.divider()
-    _downloads(api)
+    _downloads()
     st.divider()
-    _scanner_settings(api)
+    _scanner_settings()
     st.divider()
     with st.expander(f"Ιστορικό εισαγωγών Excel ({len(imports)})"):
         if imports:
             st.dataframe(pd.DataFrame([{
                 "Import ID": i["id"], "Αρχείο": i["original_filename"], "Ημερομηνία": fmt_local(i["imported_at"]),
-                "Από": i["imported_by"], "Ενεργό": "✔" if i["is_active"] else "", "Προϊόντα": i["product_count"],
-                "Διπλά": i["duplicate_barcodes"]} for i in imports]), hide_index=True, use_container_width=True)
+                "Από": i["imported_by"], "Κατάσταση": i["status"], "Ενεργό": "✔" if i["is_active"] else "",
+                "Έκδοση working": i["working_version"], "Προϊόντα": i["product_count"],
+                "Διπλά": i["duplicate_barcodes"]} for i in imports]), hide_index=True, width="stretch")
     with st.expander("Αρχείο ενεργειών (audit log)"):
         try:
-            log = api.get("/api/audit")
+            log = backend.audit_log(p)
             st.dataframe(pd.DataFrame([{"Ώρα": r["ts_local"], "Χρήστης": r["actor"], "Ενέργεια": r["action"],
-                                        "Λεπτομέρειες": r["details"]} for r in log]), hide_index=True, use_container_width=True)
-        except ApiError as exc:
-            handle_api_error(exc)
+                                        "Λεπτομέρειες": r["details"]} for r in log]), hide_index=True, width="stretch")
+        except ServiceError as exc:
+            show_error(exc)

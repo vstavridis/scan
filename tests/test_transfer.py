@@ -1,4 +1,4 @@
-"""Tests 11–15: ασφαλής μεταφορά γραμμής, διατήρηση workbook, αποτυχίες χωρίς ψευδή επιτυχία."""
+"""Μεταφορά γραμμής: ασφάλεια Excel (engine) + ροή μέσω backend (storage, έκδοση, journal, recovery)."""
 from __future__ import annotations
 
 import re
@@ -8,21 +8,24 @@ from pathlib import Path
 
 import pytest
 
+from app import backend
 from app.config import DEFAULT_SOURCE_SHEET as SRC, DEFAULT_TARGET_SHEET as TGT
+from app.db.database import connect, transaction
 from app.excel.package import XlsxPackage, iter_sheet_rows
 from app.excel.reader import validate_workbook
 from app.excel.writer import transfer_row
-from tests.conftest import activate_workbook, login, scan, sha256
+from app.services.errors import ServiceError
+from app.storage import get_store, sha256_bytes
+from tests.conftest import activate_workbook, login, scan, sha256, working_file
 
 
-def _working_path(client) -> Path:
-    imports = client.get("/api/admin/imports", headers=login(client, "admin")).json()
-    return Path(next(i for i in imports if i["is_active"])["working_path"])
-
-
-def _item_id(client, barcode: str) -> int:
-    dash = client.get("/api/dashboard", headers=login(client, "secretary")).json()
+def _item_id(barcode: str) -> int:
+    dash = backend.dashboard(login("secretary"))
     return next(i["id"] for i in dash["items"] if i["barcode"] == barcode)
+
+
+def _active_import() -> dict:
+    return next(i for i in backend.imports(login("admin")) if i["is_active"])
 
 
 def _barcodes(path: Path, sheet: str) -> list[str]:
@@ -37,7 +40,7 @@ def _barcodes(path: Path, sheet: str) -> list[str]:
 
 
 # ------------------------------------------------------------------ 12, 13: writer σε αντίγραφο
-def test_transfer_row_on_copy_preserves_workbook(workbook_copy, tmp_path, app_env):
+def test_transfer_row_on_copy_preserves_workbook(workbook_copy, tmp_path):
     rep = validate_workbook(workbook_copy, SRC, TGT)
     p = next(x for x in rep.products if x.barcode_norm == "VS11486")
     out = tmp_path / "out.xlsx"
@@ -99,7 +102,7 @@ def test_transfer_row_on_copy_preserves_workbook(workbook_copy, tmp_path, app_en
     assert rep2.ok and rep2.product_count == rep.product_count - 1
 
 
-def test_cross_sheet_references_are_adjusted(synthetic_master, tmp_path, app_env):
+def test_cross_sheet_references_are_adjusted(synthetic_master, tmp_path):
     rep = validate_workbook(synthetic_master, SRC, TGT)
     p = next(x for x in rep.products if x.barcode_norm == "VS11486")
     out = tmp_path / "out.xlsx"
@@ -112,7 +115,7 @@ def test_cross_sheet_references_are_adjusted(synthetic_master, tmp_path, app_env
     assert id_row3.cells["D"].formula == f"'{SRC}'!H2"
 
 
-def test_unsafe_shift_falls_back_to_clear_with_warning(synthetic_master, tmp_path, app_env):
+def test_unsafe_shift_falls_back_to_clear_with_warning(synthetic_master, tmp_path):
     # Το ID!D3 δείχνει ακριβώς στη γραμμή του EX1898: η φυσική διαγραφή θα έσπαγε τον τύπο.
     rep = validate_workbook(synthetic_master, SRC, TGT)
     p = next(x for x in rep.products if x.barcode_norm == "EX1898")
@@ -131,7 +134,7 @@ def test_unsafe_shift_falls_back_to_clear_with_warning(synthetic_master, tmp_pat
         transfer_row(synthetic_master, tmp_path / "o2.xlsx", SRC, TGT, p.barcode_norm, p.fingerprint, mode="shift")
 
 
-def test_changed_row_is_not_touched(synthetic_master, tmp_path, app_env):
+def test_changed_row_is_not_touched(synthetic_master, tmp_path):
     from app.excel.writer import RowNotFoundError
     rep = validate_workbook(synthetic_master, SRC, TGT)
     p = next(x for x in rep.products if x.barcode_norm == "VS11486")
@@ -140,141 +143,150 @@ def test_changed_row_is_not_touched(synthetic_master, tmp_path, app_env):
     assert not (tmp_path / "o.xlsx").exists()
 
 
-# ------------------------------------------------------------------ 14, 15: μέσω API
-def test_transfer_via_api_updates_lists_and_totals(client, workbook_copy):
-    activate_workbook(client, workbook_copy)
-    scanner, sec = login(client, "scanner"), login(client, "secretary")
-    scan(client, scanner, "VS11486", "VS11487")
-    before = client.get("/api/dashboard", headers=sec).json()
-    assert before["totals"]["total_kilos"] == "828"
-    working = _working_path(client)
+# ------------------------------------------------------------------ ροή μέσω backend + storage
+def test_transfer_updates_lists_totals_and_storage(app_env, workbook_copy, tmp_path):
+    activate_workbook(workbook_copy)
+    sec = login("secretary")
+    scan(login("scanner"), "VS11486", "VS11487")
+    assert backend.dashboard(sec)["totals"]["total_kilos"] == "828"
     original_input_sha = sha256(workbook_copy)
 
-    item_id = _item_id(client, "VS11486")
-    r = client.post(f"/api/items/{item_id}/transfer", headers=sec)
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] and body["barcode"] == "VS11486" and body["mode"] == "shift"
-    assert Path(body["backup_path"]).is_file()
+    item_id = _item_id("VS11486")
+    res = backend.transfer_item(sec, item_id)
+    assert res["ok"] and res["barcode"] == "VS11486" and res["mode"] == "shift"
+    assert res["new_version"] == 2 and res["backup_object"] == "imports/00001/working/v00001.xlsx"
 
-    # 14: εξαφανίζεται από την ενεργή λίστα (scanner + γραμματεία)
-    active = client.get("/api/active", headers=scanner).json()
-    assert [i["barcode"] for i in active["items"]] == ["VS11487"]
-    after = client.get("/api/dashboard", headers=sec).json()
+    # εξαφανίζεται από την ενεργή λίστα (αποθήκη + γραμματεία) και τα σύνολα ενημερώνονται
+    assert [i["barcode"] for i in backend.scanner_view(login("scanner"))["items"]] == ["VS11487"]
+    after = backend.dashboard(sec)
     assert [i["barcode"] for i in after["items"]] == ["VS11487"]
-    # 15: σωστή ενημέρωση SUM
-    assert after["totals"]["total_kilos"] == "416"
-    assert after["totals"]["active_barcodes"] == 1
+    assert after["totals"]["total_kilos"] == "416" and after["totals"]["active_barcodes"] == 1
     assert [(g["product"], g["total_display"]) for g in after["groups"]] == [("ΗΛΕΚΤΡΟΓΑΛΒΑΝΙΖΕ × 0.70 × 180ΧΡΟΛΟ", "416")]
 
-    # Excel: εγγραφή στο working copy, όχι στο αρχικό/ανεβασμένο αρχείο
-    assert "VS11486" not in _barcodes(working, SRC)
-    assert _barcodes(working, TGT)[-1] == "VS11486"
-    assert sha256(workbook_copy) == original_input_sha
-    imports = client.get("/api/admin/imports", headers=login(client, "admin")).json()
-    original = Path(imports[0]["original_path"])
-    assert sha256(original) == original_input_sha
+    # Excel: νέα έκδοση στο storage· αρχικό και προηγούμενη έκδοση ΑΝΑΛΛΟΙΩΤΑ
+    work = working_file(tmp_path)
+    assert "VS11486" not in _barcodes(work, SRC)
+    assert _barcodes(work, TGT)[-1] == "VS11486"
+    store = get_store()
+    assert sha256_bytes(store.get("imports/00001/original.xlsx")) == original_input_sha
+    assert sha256_bytes(store.get("imports/00001/working/v00001.xlsx")) == original_input_sha
+    imp = _active_import()
+    assert imp["working_version"] == 2 and imp["working_sha256"] == sha256(work)
 
-    # ιστορικό
-    hist = client.get("/api/history", params={"barcode": "VS11486"}, headers=sec).json()
+    hist = backend.history_rows(sec, barcode="VS11486")
     assert hist[0]["transfer_status"] == "Μεταφέρθηκε" and hist[0]["transfer_by"].startswith("test-secretary")
-
-    # δεύτερη μεταφορά ίδιου item -> άρνηση
-    r2 = client.post(f"/api/items/{item_id}/transfer", headers=sec)
-    assert r2.status_code == 409
-    # νέο scan του ίδιου barcode -> «έχει ήδη μεταφερθεί»
-    res = scan(client, scanner, "VS11486")[0]
+    with pytest.raises(ServiceError) as exc:          # δεύτερη μεταφορά -> άρνηση
+        backend.transfer_item(sec, item_id)
+    assert exc.value.status_code == 409
+    res = scan(login("scanner"), "VS11486")[0]           # νέο scan -> «έχει ήδη μεταφερθεί»
     assert res["result"] == "unknown" and "μεταφερθεί" in res["message"]
 
 
-def test_second_transfer_after_shift_hits_right_row(client, synthetic_master):
-    """Μετά από διαγραφή γραμμής, οι επόμενες μεταφορές πρέπει να βρίσκουν τη σωστή γραμμή."""
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS90001", "VS11486", "TST0100")
-    sec = login(client, "secretary")
+def test_excel_persists_across_restart(app_env, synthetic_master, tmp_path):
+    """Μετά από restart (νέα διεργασία, άδειες caches) το Excel και η έκδοσή του παραμένουν."""
+    from tests.conftest import _reset_app_state
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    backend.transfer_item(login("secretary"), _item_id("VS11486"))
+    before = sha256(working_file(tmp_path))
+    _reset_app_state()                                   # σαν να ξεκίνησε ξανά το Streamlit
+    import shutil
+    from app.config import get_settings
+    shutil.rmtree(get_settings().cache_dir, ignore_errors=True)
+    backend.startup()
+    assert _active_import()["working_version"] == 2
+    assert sha256(working_file(tmp_path)) == before
+    assert len(backend.history_rows(login("secretary"))) == 1
+
+
+def test_second_transfer_after_shift_hits_right_row(app_env, synthetic_master, tmp_path):
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS90001", "VS11486", "TST0100")
+    sec = login("secretary")
     for bc in ("VS90001", "TST0100", "VS11486"):
-        r = client.post(f"/api/items/{_item_id(client, bc)}/transfer", headers=sec)
-        assert r.status_code == 200, r.text
-    working = _working_path(client)
-    src = _barcodes(working, SRC)
+        backend.transfer_item(sec, _item_id(bc))
+    work = working_file(tmp_path)
+    src = _barcodes(work, SRC)
     assert not {"VS90001", "VS11486", "TST0100"} & set(src)
     assert "TST0099" in src and "TST0101" in src
-    assert _barcodes(working, TGT)[-3:] == ["VS90001", "TST0100", "VS11486"]
-    rep = validate_workbook(working, SRC, TGT)
-    assert rep.ok
+    assert _barcodes(work, TGT)[-3:] == ["VS90001", "TST0100", "VS11486"]
+    assert validate_workbook(work, SRC, TGT).ok
+    assert _active_import()["working_version"] == 4
 
 
-def test_concurrent_double_click_transfers_once(client, synthetic_master):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS11486")
-    sec = login(client, "secretary")
-    item = _item_id(client, "VS11486")
-    results: list[int] = []
+def test_concurrent_transfers_are_safe(app_env, synthetic_master, tmp_path):
+    """Διπλό click + δύο γραμματείς ταυτόχρονα: κάθε προϊόν μεταφέρεται μία φορά, καμία χαμένη αλλαγή."""
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486", "VS11487", "VS90001")
+    sec = login("secretary")
+    ids = [_item_id(b) for b in ("VS11486", "VS11487", "VS90001")]
+    outcomes: list[str] = []
+    lock = threading.Lock()
 
-    def go():
-        results.append(client.post(f"/api/items/{item}/transfer", headers=sec).status_code)
+    def go(item_id: int) -> None:
+        try:
+            backend.transfer_item(sec, item_id)
+            r = "ok"
+        except ServiceError as exc:
+            r = f"err{exc.status_code}"
+        with lock:
+            outcomes.append(r)
 
-    threads = [threading.Thread(target=go) for _ in range(5)]
+    threads = [threading.Thread(target=go, args=(i,)) for i in ids for _ in range(3)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
-    assert results.count(200) == 1, results
-    assert _barcodes(_working_path(client), TGT).count("VS11486") == 1
+        t.join(120)
+    assert outcomes.count("ok") == 3, outcomes
+    assert all(o in ("ok", "err409") for o in outcomes), outcomes
+    work = working_file(tmp_path)
+    tgt = _barcodes(work, TGT)
+    for bc in ("VS11486", "VS11487", "VS90001"):
+        assert tgt.count(bc) == 1                       # καμία διπλή εγγραφή, καμία χαμένη
+        assert bc not in _barcodes(work, SRC)
+    assert _active_import()["working_version"] == 4
 
 
-# ------------------------------------------------------------------ 11: αποτυχία εγγραφής χωρίς ψευδή επιτυχία
-def test_locked_excel_reports_error_and_changes_nothing(client, synthetic_master):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS11486")
-    sec = login(client, "secretary")
-    working = _working_path(client)
-    before = sha256(working)
-    lock = working.with_name("~$" + working.name)  # όπως το δημιουργεί το Excel όταν ανοίγει αρχείο
-    lock.write_text("locked")
-    r = client.post(f"/api/items/{_item_id(client, 'VS11486')}/transfer", headers=sec)
-    assert r.status_code == 423
-    assert "ανοιχτό" in r.json()["detail"]
-    assert sha256(working) == before
-    dash = client.get("/api/dashboard", headers=sec).json()
-    assert [i["barcode"] for i in dash["items"]] == ["VS11486"]   # δεν αφαιρέθηκε
-    lock.unlink()
-    r = client.post(f"/api/items/{_item_id(client, 'VS11486')}/transfer", headers=sec)
-    assert r.status_code == 200, r.text  # μετά το ξεκλείδωμα επιτρέπεται κανονικά
+# ------------------------------------------------------------------ αποτυχίες χωρίς ψευδή επιτυχία
+def test_storage_failure_is_not_success(app_env, synthetic_master, monkeypatch, tmp_path):
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    sec = login("secretary")
+    before = sha256(working_file(tmp_path))
+    store = get_store()
+    from app.storage import StorageError
 
+    def boom(path, data, content_type=None):
+        raise StorageError("Supabase Storage μη διαθέσιμο (προσομοίωση)")
 
-def test_failed_excel_replace_is_not_success(client, synthetic_master, monkeypatch):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS11486")
-    sec = login(client, "secretary")
-    working = _working_path(client)
-    before = sha256(working)
-
-    from app.excel import storage
-
-    def boom(self, tmp, dest):
-        raise OSError("disk full (simulated)")
-
-    monkeypatch.setattr(storage.LocalExcelStore, "replace_atomic", boom)
-    r = client.post(f"/api/items/{_item_id(client, 'VS11486')}/transfer", headers=sec)
-    assert r.status_code == 400
-    assert r.json()["code"] == "transfer_failed"
-    assert sha256(working) == before
-    dash = client.get("/api/dashboard", headers=sec).json()
-    assert dash["totals"]["active_barcodes"] == 1
-    hist = client.get("/api/history", headers=sec).json()
-    assert hist[0]["transfer_status"] != "Μεταφέρθηκε"
-    # δεν μένουν προσωρινά αρχεία
-    assert not list(working.parent.glob("*.tmp.xlsx"))
+    monkeypatch.setattr(store, "put", boom)
+    with pytest.raises(ServiceError) as exc:
+        backend.transfer_item(sec, _item_id("VS11486"))
+    assert exc.value.code == "transfer_failed" and "δεν αποθηκεύτηκε" in exc.value.message
     monkeypatch.undo()
-    r = client.post(f"/api/items/{_item_id(client, 'VS11486')}/transfer", headers=sec)
-    assert r.status_code == 200, r.text
+    assert sha256(working_file(tmp_path)) == before and _active_import()["working_version"] == 1
+    assert backend.dashboard(sec)["totals"]["active_barcodes"] == 1
+    assert backend.history_rows(sec)[0]["transfer_status"] != "Μεταφέρθηκε"
+    backend.transfer_item(sec, _item_id("VS11486"))      # μετά την αποκατάσταση: κανονικά
+    assert _active_import()["working_version"] == 2
 
 
-def test_writer_error_is_not_success(client, synthetic_master, monkeypatch):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS11486")
-    sec = login(client, "secretary")
+def test_corrupted_upload_is_detected(app_env, synthetic_master, monkeypatch, tmp_path):
+    """Αν το storage αποθηκεύσει άλλο περιεχόμενο από αυτό που στείλαμε, η μεταφορά ακυρώνεται."""
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    store = get_store()
+    real_put = store.put
+    monkeypatch.setattr(store, "put", lambda path, data, content_type=None: real_put(path, data[:-10] + b"x" * 10))
+    with pytest.raises(ServiceError):
+        backend.transfer_item(login("secretary"), _item_id("VS11486"))
+    monkeypatch.undo()
+    assert _active_import()["working_version"] == 1
+
+
+def test_writer_error_is_not_success(app_env, synthetic_master, monkeypatch):
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
     from app.excel.writer import UnsupportedStructureError
     from app.services import transfer as transfer_service
 
@@ -282,26 +294,56 @@ def test_writer_error_is_not_success(client, synthetic_master, monkeypatch):
         raise UnsupportedStructureError("simulated")
 
     monkeypatch.setattr(transfer_service, "transfer_row", fail)
-    r = client.post(f"/api/items/{_item_id(client, 'VS11486')}/transfer", headers=sec)
-    assert r.status_code == 400 and "δεν έγινε" in r.json()["detail"]
-    assert client.get("/api/dashboard", headers=sec).json()["totals"]["active_barcodes"] == 1
+    with pytest.raises(ServiceError) as exc:
+        backend.transfer_item(login("secretary"), _item_id("VS11486"))
+    assert "δεν έγινε" in exc.value.message
+    assert backend.dashboard(login("secretary"))["totals"]["active_barcodes"] == 1
 
 
-def test_recovery_after_crash_between_excel_and_db(client, synthetic_master, monkeypatch):
-    activate_workbook(client, synthetic_master)
-    scan(client, login(client, "scanner"), "VS11486")
-    sec = login(client, "secretary")
+def test_version_conflict_aborts_without_change(app_env, synthetic_master, monkeypatch, tmp_path):
+    """Αν το working Excel άλλαξε από άλλη διεργασία στο μεταξύ, η μεταφορά δεν δεσμεύεται."""
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    from app.services import transfer as transfer_service
+    real_complete = transfer_service._complete
+
+    def bump_then_complete(op_id, actor, import_id, base_version, *rest):
+        with transaction() as conn:   # άλλη "διεργασία" προχώρησε την έκδοση
+            conn.execute("UPDATE excel_imports SET working_version = working_version + 1 WHERE id=?", (import_id,))
+        return real_complete(op_id, actor, import_id, base_version, *rest)
+
+    monkeypatch.setattr(transfer_service, "_complete", bump_then_complete)
+    with pytest.raises(ServiceError) as exc:
+        backend.transfer_item(login("secretary"), _item_id("VS11486"))
+    assert "έκδοσης" in exc.value.message
+    with connect() as conn:
+        op = conn.execute("SELECT status FROM transfer_operations").fetchone()
+    assert op["status"] == "failed"
+    assert backend.dashboard(login("secretary"))["totals"]["active_barcodes"] == 1
+
+
+def test_recovery_of_interrupted_transfer(app_env, synthetic_master, monkeypatch, tmp_path):
+    """Η διεργασία "πέθανε" μετά το ανέβασμα της νέας έκδοσης αλλά πριν το commit."""
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    sec = login("secretary")
+    before = sha256(working_file(tmp_path))
     from app.services import transfer as transfer_service
 
-    def crash(op_id, actor):
-        raise RuntimeError("process killed (simulated)")
+    def crash(*a, **k):
+        raise SystemExit("process killed (simulated)")
 
     monkeypatch.setattr(transfer_service, "_complete", crash)
-    with pytest.raises(RuntimeError):
-        transfer_service.transfer_item(_item_id(client, "VS11486"), "tester")
+    with pytest.raises(SystemExit):
+        backend.transfer_item(sec, _item_id("VS11486"))
     monkeypatch.undo()
-    # Το Excel γράφτηκε, η βάση όχι ακόμη -> η αναζήτηση στο startup ολοκληρώνει τη μεταφορά
-    assert client.get("/api/dashboard", headers=sec).json()["totals"]["active_barcodes"] == 1
-    report = transfer_service.recover_pending()
-    assert report == [{"operation_id": 1, "outcome": "completed"}]
-    assert client.get("/api/dashboard", headers=sec).json()["totals"]["active_barcodes"] == 0
+    with connect() as conn:
+        assert conn.execute("SELECT status FROM transfer_operations").fetchone()["status"] == "started"
+    # Το Excel δεν άλλαξε (ο δείκτης έκδοσης δεν μετακινήθηκε)
+    assert sha256(working_file(tmp_path)) == before and _active_import()["working_version"] == 1
+    assert transfer_service.recover_pending(max_age_seconds=0) == [{"operation_id": 1, "outcome": "rolled_back"}]
+    with connect() as conn:
+        assert conn.execute("SELECT status FROM transfer_operations").fetchone()["status"] == "failed"
+        conn.execute("DELETE FROM app_locks")  # το lease της "νεκρής" διεργασίας θα έληγε μόνο του
+    res = backend.transfer_item(sec, _item_id("VS11486"))   # η μεταφορά μπορεί να γίνει ξανά
+    assert res["new_version"] == 2

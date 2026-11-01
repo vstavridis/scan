@@ -1,8 +1,9 @@
-# Βασικές εξαρτήσεις (Python 3.11+)
-fastapi>=0.115,<1
-uvicorn>=0.30
-streamlit>=1.40
-httpx>=0.27
-openpyxl>=3.1.2
-pandas>=2.1
-tzdata>=2024.1          # απαραίτητο στα Windows για τη ζώνη ώρας Europe/Athens
+# Εξαρτήσεις για το Streamlit Community Cloud (Python 3.12/3.13).
+# Οι εκδόσεις είναι αυτές με τις οποίες δοκιμάστηκε η εφαρμογή.
+streamlit==1.66.1          # Custom Components v2 (οθόνη σάρωσης χωρίς iframe), st.fragment, st.navigation
+psycopg[binary]==3.3.6     # Supabase PostgreSQL
+psycopg-pool==3.3.3
+httpx==0.28.1              # Supabase Storage REST API
+openpyxl==3.1.5            # εξαγωγή ιστορικού σε Excel
+pandas==3.0.5
+tzdata>=2024.1             # ζώνη ώρας Europe/Athens

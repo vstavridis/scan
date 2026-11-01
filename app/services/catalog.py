@@ -1,60 +1,95 @@
-"""Εισαγωγή Excel (εκδόσεις) και κατάλογος αναζήτησης barcode."""
+"""Εισαγωγή Excel (εκδόσεις) και κατάλογος αναζήτησης barcode.
+
+Αρχεία στο object storage (Supabase Storage, private bucket):
+
+    staging/<id>.xlsx                         ανεβασμένο, ελεγμένο, όχι ακόμη ενεργό
+    imports/<NNNNN>/original.xlsx             αναλλοίωτο αρχικό αρχείο της εισαγωγής
+    imports/<NNNNN>/working/v<NNNNN>[_opNNNNNN].xlsx  εκδόσεις working Excel (αμετάβλητες)
+    backups/<χρονοσφραγίδα>_<λόγος>.xlsx       χειροκίνητα αντίγραφα ασφαλείας
+
+Η PostgreSQL κρατά τον κατάλογο προϊόντων (για γρήγορη αναζήτηση σε κάθε scan, χωρίς
+κατέβασμα Excel) και ποια έκδοση working Excel είναι η τρέχουσα.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import re
-import shutil
-import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.db.database import bump_version, connect, transaction
-from app.excel.reader import ValidationReport, snapshot_json, validate_workbook
-from app.excel.storage import excel_write_lock, get_store
+from app.db.database import Conn, bump_version, connect, transaction
+from app.excel.reader import ValidationReport, validate_workbook
 from app.services.audit import audit
 from app.services.errors import ConfirmationRequired, NotFound, ServiceError
+from app.services.locks import lease
+from app.storage import StorageError, cached_get, get_store, sha256_bytes
 from app.timeutil import local_stamp, utcnow_iso
 
 log = logging.getLogger(__name__)
 
 _STAGING_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # όριο αρχείου του Supabase Storage (free plan)
+EXCEL_LOCK = "excel"
+
+
+def original_object(import_id: int) -> str:
+    return f"imports/{import_id:05d}/original.xlsx"
+
+
+def working_object(import_id: int, version: int, op_id: int | None = None) -> str:
+    """Όνομα αρχείου έκδοσης. Οι εκδόσεις από μεταφορές περιέχουν και τον αριθμό της ενέργειας,
+    ώστε ένα "ορφανό" αρχείο από μεταφορά που διακόπηκε να μη συγκρούεται με νέα προσπάθεια."""
+    suffix = f"_op{op_id:06d}" if op_id is not None else ""
+    return f"imports/{import_id:05d}/working/v{version:05d}{suffix}.xlsx"
+
+
+def _validate_bytes(data: bytes) -> ValidationReport:
+    s = get_settings()
+    s.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = s.cache_dir / f"validate-{uuid.uuid4().hex}.xlsx"
+    tmp.write_bytes(data)
+    try:
+        return validate_workbook(tmp, s.source_sheet, s.target_sheet)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- staging
-def _staging_path(staging_id: str) -> Path:
-    if not _STAGING_ID_RE.match(staging_id):
-        raise ServiceError("Μη έγκυρο αναγνωριστικό αρχείου.")
-    return get_settings().staging_dir / f"{staging_id}.xlsx"
-
-
 def stage_upload(filename: str, data: bytes, actor: str) -> dict[str, Any]:
-    """Αποθηκεύει το ανεβασμένο αρχείο σε μόνιμο φάκελο staging και το ελέγχει."""
+    """Ελέγχει το ανεβασμένο αρχείο και το φυλάσσει μόνιμα (staging) στο object storage."""
+    filename = Path(filename).name
     if not filename.lower().endswith(".xlsx"):
         raise ServiceError("Επιτρέπονται μόνο αρχεία .xlsx.")
     if not data:
         raise ServiceError("Το αρχείο είναι κενό.")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise ServiceError("Το αρχείο είναι πολύ μεγάλο.")
+        raise ServiceError("Το αρχείο είναι πολύ μεγάλο (όριο 50 MB).")
+    report = _validate_bytes(data)
     staging_id = uuid.uuid4().hex
-    path = _staging_path(staging_id)
-    path.write_bytes(data)
-    (path.with_suffix(".name")).write_text(filename, encoding="utf-8")
-    s = get_settings()
-    report = validate_workbook(path, s.source_sheet, s.target_sheet)
-    log.info("Staged %s as %s (ok=%s)", filename, staging_id, report.ok)
+    obj = f"staging/{staging_id}.xlsx"
+    try:
+        digest = get_store().put_verified(obj, data)
+    except StorageError as exc:
+        raise ServiceError(f"Το αρχείο δεν αποθηκεύτηκε στο Supabase Storage: {exc}") from exc
+    summary = report.summary()
     with transaction() as conn:
+        conn.execute(
+            "INSERT INTO staged_uploads(id, filename, object_path, sha256, uploaded_by, uploaded_at, report_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (staging_id, filename, obj, digest, actor, utcnow_iso(), json.dumps(summary, ensure_ascii=False)),
+        )
         audit(conn, actor, "import.stage", {"filename": filename, "staging_id": staging_id, "ok": report.ok,
                                             "products": report.product_count})
-    return {"staging_id": staging_id, "filename": filename, "report": report.summary()}
+    log.info("Staged %s as %s (ok=%s)", filename, staging_id, report.ok)
+    return {"staging_id": staging_id, "filename": filename, "report": summary}
 
 
 # --------------------------------------------------------------------------- activation
-def active_import(conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
-    def q(c: sqlite3.Connection):
+def active_import(conn: Conn | None = None) -> dict[str, Any] | None:
+    def q(c: Conn):
         row = c.execute("SELECT * FROM excel_imports WHERE is_active = 1").fetchone()
         return dict(row) if row else None
 
@@ -64,38 +99,31 @@ def active_import(conn: sqlite3.Connection | None = None) -> dict[str, Any] | No
         return q(c)
 
 
-def count_active_items(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM active_items WHERE status='active'").fetchone()[0]
-
-
-def _backup_database(reason: str) -> Path:
-    s = get_settings()
-    dest = s.backups_dir / f"{local_stamp()}_db_{reason}.sqlite3"
-    src = sqlite3.connect(str(s.db_path))
-    try:
-        dst = sqlite3.connect(str(dest))
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-    finally:
-        src.close()
-    return dest
+def count_active_items(conn: Conn) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM active_items WHERE status='active'").fetchone()["n"])
 
 
 def activate(staging_id: str, actor: str, confirm_replace: bool = False) -> dict[str, Any]:
-    path = _staging_path(staging_id)
-    if not path.is_file():
+    if not _STAGING_ID_RE.match(staging_id or ""):
+        raise ServiceError("Μη έγκυρο αναγνωριστικό αρχείου.")
+    with connect() as conn:
+        staged = conn.execute("SELECT * FROM staged_uploads WHERE id=?", (staging_id,)).fetchone()
+    if staged is None:
         raise NotFound("Το αρχείο προς ενεργοποίηση δεν βρέθηκε. Ανεβάστε το ξανά.")
-    name_file = path.with_suffix(".name")
-    filename = name_file.read_text(encoding="utf-8") if name_file.is_file() else path.name
-    s = get_settings()
-    report: ValidationReport = validate_workbook(path, s.source_sheet, s.target_sheet)
+    staged = dict(staged)
+    store = get_store()
+    try:
+        data = store.get(staged["object_path"])
+    except StorageError as exc:
+        raise ServiceError(f"Δεν ήταν δυνατή η ανάκτηση του αρχείου: {exc}") from exc
+    if sha256_bytes(data) != staged["sha256"]:
+        raise ServiceError("Το αποθηκευμένο αρχείο δεν ταιριάζει με αυτό που ελέγχθηκε. Ανεβάστε το ξανά.")
+    report = _validate_bytes(data)
     if not report.ok:
         raise ServiceError("Το αρχείο δεν πέρασε τον έλεγχο: " + "; ".join(report.errors), extra={"report": report.summary()})
+    s = get_settings()
 
-    store = get_store()
-    with excel_write_lock:
+    with lease(EXCEL_LOCK, busy_message="Εκτελείται μεταφορά ή άλλη εισαγωγή Excel. Δοκιμάστε ξανά σε λίγο."):
         with connect() as conn:
             n_active = count_active_items(conn)
             previous = active_import(conn)
@@ -104,27 +132,32 @@ def activate(staging_id: str, actor: str, confirm_replace: bool = False) -> dict
                 f"Υπάρχουν {n_active} ενεργά barcode στη λίστα. Η αντικατάσταση του Excel απαιτεί ρητή επιβεβαίωση.",
                 extra={"active_items": n_active},
             )
-        backups: list[str] = []
-        if previous is not None:
-            prev_working = Path(previous["working_path"])
-            if prev_working.is_file():
-                backups.append(str(store.backup(prev_working, "before-new-import")))
-            backups.append(str(_backup_database("before-new-import")))
-
+        # 1. νέα εγγραφή εισαγωγής (pending)
         with transaction() as conn:
-            cur = conn.execute(
-                """INSERT INTO excel_imports(original_filename, original_path, working_path, original_sha256,
-                       imported_at, imported_by, is_active, product_count, unique_barcodes, duplicate_barcodes,
-                       source_sheet, target_sheet, notes)
-                   VALUES (?, '', '', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
-                (filename, report.sha256, utcnow_iso(), actor, report.product_count, report.unique_barcodes,
-                 report.duplicate_barcodes, s.source_sheet, s.target_sheet,
+            import_id = int(conn.execute(
+                """INSERT INTO excel_imports(original_filename, original_sha256, imported_at, imported_by, status,
+                       is_active, product_count, unique_barcodes, duplicate_barcodes, source_sheet, target_sheet, notes)
+                   VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?) RETURNING id""",
+                (staged["filename"], staged["sha256"], utcnow_iso(), actor, report.product_count,
+                 report.unique_barcodes, report.duplicate_barcodes, s.source_sheet, s.target_sheet,
                  json.dumps({"warnings": report.warnings}, ensure_ascii=False)),
+            ).fetchone()["id"])
+        # 2. αρχικό + πρώτη έκδοση working στο storage (με επαλήθευση)
+        orig, work = original_object(import_id), working_object(import_id, 1)
+        try:
+            store.put_verified(orig, data)
+            store.put_verified(work, data)
+        except StorageError as exc:
+            with transaction() as conn:
+                conn.execute("UPDATE excel_imports SET status='failed', notes=? WHERE id=?", (str(exc), import_id))
+            raise ServiceError(f"Η ενεργοποίηση ακυρώθηκε: το Excel δεν αποθηκεύτηκε ({exc}).") from exc
+        # 3. ενεργοποίηση + κατάλογος + αντιστοίχιση ενεργής λίστας (ένα transaction)
+        with transaction(lock="scans") as conn:
+            conn.execute(
+                "UPDATE excel_imports SET original_object=?, working_object=?, working_version=1, working_sha256=?, "
+                "status='ready' WHERE id=?",
+                (orig, work, staged["sha256"], import_id),
             )
-            import_id = int(cur.lastrowid)
-            original, working = store.save_original(import_id, path, filename)
-            conn.execute("UPDATE excel_imports SET original_path=?, working_path=? WHERE id=?",
-                         (str(original), str(working), import_id))
             conn.execute("UPDATE excel_imports SET is_active=0 WHERE is_active=1")
             conn.execute("UPDATE excel_imports SET is_active=1 WHERE id=?", (import_id,))
             conn.executemany(
@@ -140,22 +173,24 @@ def activate(staging_id: str, actor: str, confirm_replace: bool = False) -> dict
                 ],
             )
             remapped = _remap_active_items(conn, import_id)
+            conn.execute("DELETE FROM staged_uploads WHERE id=?", (staging_id,))
+            backups = [previous["working_object"]] if previous else []
             audit(conn, actor, "import.activate", {
-                "import_id": import_id, "filename": filename, "products": report.product_count,
-                "backups": backups, "remapped": remapped,
+                "import_id": import_id, "filename": staged["filename"], "products": report.product_count,
+                "previous_import": previous["id"] if previous else None, "previous_working": backups,
+                "remapped": remapped,
             })
             bump_version(conn)
     try:
-        path.unlink()
-        name_file.unlink(missing_ok=True)
-    except OSError:
-        pass
-    log.info("Activated import %s (%s)", import_id, filename)
-    return {"import_id": import_id, "filename": filename, "report": report.summary(), "backups": backups,
+        store.delete(staged["object_path"])
+    except StorageError:
+        log.warning("Could not delete staging object %s", staged["object_path"])
+    log.info("Activated import %s (%s)", import_id, staged["filename"])
+    return {"import_id": import_id, "filename": staged["filename"], "report": report.summary(), "backups": backups,
             "remapped": remapped}
 
 
-def _remap_active_items(conn: sqlite3.Connection, import_id: int) -> dict[str, int]:
+def _remap_active_items(conn: Conn, import_id: int) -> dict[str, int]:
     """Ενημερώνει την ενεργή λίστα ώστε να δείχνει στον νέο κατάλογο."""
     counts = {"ok": 0, "ambiguous": 0, "unknown": 0}
     items = conn.execute("SELECT id, barcode_norm FROM active_items WHERE status='active'").fetchall()
@@ -174,14 +209,14 @@ def _remap_active_items(conn: sqlite3.Connection, import_id: int) -> dict[str, i
 
 
 # --------------------------------------------------------------------------- lookups
-def lookup(conn: sqlite3.Connection, import_id: int, barcode_norm: str, include_transferred: bool = False) -> list[sqlite3.Row]:
+def lookup(conn: Conn, import_id: int, barcode_norm: str, include_transferred: bool = False) -> list[Any]:
     sql = "SELECT * FROM product_records WHERE import_id=? AND barcode_norm=?"
     if not include_transferred:
         sql += " AND status='available'"
     return conn.execute(sql + " ORDER BY sheet_row", (import_id, barcode_norm)).fetchall()
 
 
-def product_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def product_dict(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
@@ -189,7 +224,7 @@ def product_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return d
 
 
-def snapshot_from_record(row: sqlite3.Row) -> str:
+def snapshot_from_record(row: Any) -> str:
     d = {k: row[k] for k in ("barcode", "eidos", "paxos", "diastaseis", "temaxia", "kila", "pelatis", "vspg",
                              "topothesia", "thesi", "rolo", "sheet_row")}
     d["extra"] = json.loads(row["extra_json"] or "{}")
@@ -198,7 +233,7 @@ def snapshot_from_record(row: sqlite3.Row) -> str:
 
 def list_imports() -> list[dict[str, Any]]:
     with connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM excel_imports ORDER BY id DESC")]
+        return [dict(r) for r in conn.execute("SELECT * FROM excel_imports ORDER BY id DESC").fetchall()]
 
 
 def search_products(term: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -215,24 +250,43 @@ def search_products(term: str, limit: int = 50) -> list[dict[str, Any]]:
         return [product_dict(r) for r in rows]  # type: ignore[misc]
 
 
-def cleanup_staging(max_age_hours: int = 72) -> None:
-    import time
-    cutoff = time.time() - max_age_hours * 3600
-    for f in get_settings().staging_dir.glob("*"):
-        try:
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
-        except OSError:
-            pass
-
-
-def copy_working(dest: Path) -> Path:
+# --------------------------------------------------------------------------- αρχεία
+def working_bytes() -> tuple[str, bytes]:
+    """(όνομα αρχείου, περιεχόμενο) του τρέχοντος ενημερωμένου Excel, με έλεγχο sha256."""
     imp = active_import()
     if imp is None:
         raise NotFound("Δεν υπάρχει ενεργό Excel.")
-    with excel_write_lock:
-        shutil.copy2(imp["working_path"], dest)
-    return dest
+    path = cached_get(imp["working_object"], imp["working_sha256"])
+    stem = Path(imp["original_filename"]).stem
+    return f"{stem}_ενημερωμένο_v{imp['working_version']}_{local_stamp()[:15]}.xlsx", path.read_bytes()
 
 
-__all__ = ["stage_upload", "activate", "active_import", "lookup", "list_imports", "snapshot_json"]
+def make_backup(actor: str) -> str:
+    imp = active_import()
+    if imp is None:
+        raise NotFound("Δεν υπάρχει ενεργό Excel.")
+    data = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
+    obj = f"backups/{local_stamp()}_manual_import-{imp['id']:05d}_v{imp['working_version']:05d}.xlsx"
+    get_store().put_verified(obj, data)
+    with transaction() as conn:
+        audit(conn, actor, "backup.manual", {"object": obj})
+    return obj
+
+
+def list_backups() -> list[dict[str, Any]]:
+    """Όλες οι αποθηκευμένες εκδόσεις: αρχικά, κάθε έκδοση working, χειροκίνητα backups."""
+    store = get_store()
+    out = []
+    for prefix, kind in (("backups", "Χειροκίνητο αντίγραφο"), ("imports", "")):
+        for o in store.list(prefix):
+            label = kind
+            if not label:
+                label = "Αρχικό αρχείο" if o.path.endswith("original.xlsx") else "Έκδοση working Excel"
+            out.append({"path": o.path, "size": o.size, "updated_at": o.updated_at, "kind": label})
+    return sorted(out, key=lambda o: o["path"], reverse=True)
+
+
+def get_object(path: str) -> bytes:
+    if not (path.startswith("imports/") or path.startswith("backups/")):
+        raise NotFound("Δεν βρέθηκε.")
+    return get_store().get(path)

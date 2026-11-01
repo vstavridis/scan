@@ -10,8 +10,9 @@ import streamlit as st
 
 from app.services.normalize import format_kilos, normalize_text
 from app.timeutil import fmt_local
-from app.ui.api_client import ApiError
-from app.ui.common import client, handle_api_error, require
+from app import backend
+from app.services.errors import ServiceError
+from app.ui.common import principal, require, show_error
 
 PAGE_SIZE = 40
 
@@ -41,27 +42,24 @@ def _show_flash() -> None:
 
 
 def _do(action: str, item: dict[str, Any], **payload: Any) -> None:
-    api = client()
+    p = principal()
     try:
         if action == "transfer":
             with st.spinner(f"Μεταφορά {item['barcode']} στο Excel…"):
-                res = api.post(f"/api/items/{item['id']}/transfer", timeout=120)
+                res = backend.transfer_item(p, item["id"])
             msg = (f"✔ Το {res['barcode']} μεταφέρθηκε στα Σβησμένα "
-                   f"(γραμμή {res['source_row']} → γραμμή {res['target_row']}).")
+                   f"(γραμμή {res['source_row']} → γραμμή {res['target_row']}, έκδοση Excel v{res['new_version']}).")
             _flash("success", msg)
             if res.get("warning"):
                 _flash("warning", "⚠ " + res["warning"])
         elif action == "remove":
-            api.post(f"/api/items/{item['id']}/remove", json={"reason": payload.get("reason", "")})
+            backend.remove_item(p, item["id"], payload.get("reason", ""))
             _flash("info", f"Το {item['barcode']} αφαιρέθηκε από την ενεργή λίστα (καταγράφηκε στο ιστορικό).")
         elif action == "resolve":
-            api.post(f"/api/items/{item['id']}/resolve", json={"product_record_id": payload["product_record_id"]})
+            backend.resolve_item(p, item["id"], payload["product_record_id"])
             _flash("success", f"Ορίστηκε η γραμμή Excel {payload.get('sheet_row')} για το {item['barcode']}.")
-    except ApiError as exc:
-        if exc.status == 401:
-            handle_api_error(exc)
-        else:
-            _flash("error", f"✖ {item['barcode']}: {exc.message}")
+    except ServiceError as exc:
+        _flash("error", f"✖ {item['barcode']}: {exc.message}")
     st.session_state.pop("confirm", None)
 
 
@@ -109,7 +107,7 @@ def _groups_tab(groups: list[dict[str, Any]], items_by_id: dict[int, dict[str, A
         {"Προϊόν": g["product"], "Συνολικά κιλά": format_kilos(g["total"]), "Πελάτης": g["pelatis"], "Τεμ. barcode": g["count"]}
         for g in groups
     ])
-    st.dataframe(df, hide_index=True, use_container_width=True,
+    st.dataframe(df, hide_index=True, width="stretch",
                  column_config={"Συνολικά κιλά": st.column_config.TextColumn(width="small")})
     total = sum((Decimal(g["total"]) for g in groups), Decimal(0))
     st.markdown(f"<div class='total-line'>Γενικό σύνολο: {format_kilos(total)} κιλά</div>", unsafe_allow_html=True)
@@ -118,7 +116,7 @@ def _groups_tab(groups: list[dict[str, Any]], items_by_id: dict[int, dict[str, A
         missing = f" · ⚠ {g['missing_kilos']} χωρίς κιλά" if g["missing_kilos"] else ""
         with st.expander(f"{g['product']}  —  {g['pelatis']}  —  {g['total_display']} κιλά  ({g['count']}){missing}"):
             st.dataframe(pd.DataFrame([{"Barcode": b["barcode"], "Κιλά": format_kilos(b["kila"])} for b in g["barcodes"]]),
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
 
 
 def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
@@ -147,7 +145,7 @@ def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
         c[5].markdown(f"<div class='row-cell'>{it.get('pelatis') or ''}</div>", unsafe_allow_html=True)
         c[6].markdown(f"<div class='row-cell'>{badge}</div>", unsafe_allow_html=True)
         if it["state"] == "ok":
-            if c[7].button("Μεταφορά στα Σβησμένα", key=f"tr-{it['id']}", disabled=busy, use_container_width=True):
+            if c[7].button("Μεταφορά στα Σβησμένα", key=f"tr-{it['id']}", disabled=busy, width="stretch"):
                 st.session_state["confirm"] = {"action": "transfer", "item": it}
                 st.rerun(scope="fragment")
         else:
@@ -162,7 +160,6 @@ def _review_tab(items: list[dict[str, Any]]) -> None:
     if not review:
         st.success("Δεν υπάρχουν barcode προς έλεγχο.")
         return
-    api = client()
     for it in review:
         with st.container(border=True):
             st.markdown(f"<span class='mono'>{it['barcode']}</span> &nbsp; "
@@ -175,8 +172,8 @@ def _review_tab(items: list[dict[str, Any]]) -> None:
                 cands = cache.get(it["id"])
                 if cands is None:
                     try:
-                        cands = cache[it["id"]] = api.get(f"/api/items/{it['id']}/candidates")
-                    except ApiError as exc:
+                        cands = cache[it["id"]] = backend.candidates(principal(), it["id"])
+                    except ServiceError as exc:
                         st.error(exc.message)
                         cands = []
                 st.write("Πιθανές αντιστοιχίσεις στο Excel — επιλέξτε τη σωστή γραμμή:")
@@ -200,14 +197,17 @@ def page() -> None:
         return
     st.title("Γραμματεία — Ζωντανή εικόνα")
     term = st.text_input("🔎 Αναζήτηση (barcode, είδος ή πελάτης)", key="dash_search", placeholder="π.χ. VS114 ή ΑΠΟΘΗΚΗ")
-    refresh = st.session_state.get("dash_refresh", 1.0)
+    try:
+        refresh = float(backend.public_config()["dashboard_refresh_seconds"])
+    except Exception:
+        refresh = 1.5
 
     @st.fragment(run_every=refresh)
     def live() -> None:
         try:
-            data = client().get("/api/dashboard", timeout=10)
-        except ApiError as exc:
-            handle_api_error(exc)
+            data = backend.dashboard(principal())
+        except ServiceError as exc:
+            show_error(exc)
             return
         imp = data.get("import")
         if imp is None:
