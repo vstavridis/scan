@@ -73,6 +73,10 @@ def _remote_candidate(remote: bytes, op: dict, imp: dict, expected: bytes) -> by
                                   normalize_barcode(op["barcode"]), fingerprint, mode=op["mode"])
         except TransferError as exc:
             raise Conflict("Δεν ήταν δυνατή η ασφαλής επανεφαρμογή της μεταφοράς: " + str(exc)) from exc
+        except Exception as exc:
+            log.warning("Remote OneDrive package could not be transformed: %s", type(exc).__name__)
+            raise ServiceError("Το online Excel έχει εσωτερική μορφή που δεν υποστηρίζει "
+                               "η ασφαλής επανεφαρμογή. Δεν έγινε καμία αλλαγή στο OneDrive.") from None
         if (result.mode != op["mode"] or result.source_row != op["source_row"]
                 or result.target_row != op["target_row"]):
             raise Conflict("Η μεταφορά στο online Excel θα επηρέαζε διαφορετική γραμμή. Δεν έγινε αλλαγή.")
