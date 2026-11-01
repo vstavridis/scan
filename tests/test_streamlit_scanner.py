@@ -339,12 +339,13 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         page = ctx.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        open_page(page, srv.url)
+        open_page(page, srv.url, "", "Μαρία")   # όνομα για το ιστορικό μέσω της διεύθυνσης (?user=)
         page.wait_for_selector("text=Γραμματεία — Ζωντανή εικόνα", timeout=30000)
         assert page.locator('input[aria-label="Κωδικός"]').count() == 0
         assert page.locator("text=Σύνδεση").count() == 0
-        page.fill('input[aria-label="Όνομα χρήστη / συσκευής (για το ιστορικό)"]', "Μαρία")
-        page.keyboard.press("Enter")
+        sidebar = page.locator('[data-testid="stSidebar"]')
+        assert sidebar.locator("text=Αποθήκη Barcode").count() == 0          # χωρίς τίτλο στο sidebar
+        assert sidebar.locator("input").count() == 0                         # χωρίς πεδίο ονόματος
         for link, marker in (("Scanner / Αποθήκη", ".whs-root"), ("Ιστορικό", "text=Ιστορικό σκαναρισμάτων"),
                              ("Ρυθμίσεις", "text=Ανέβασμα νέου Excel"),
                              ("Γραμματεία / Dashboard", "text=Γραμματεία — Ζωντανή εικόνα")):
@@ -366,4 +367,42 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         log = backend.audit_log(login("admin"))
         assert next(r for r in log if r["action"] == "transfer.completed")["actor"] == "Μαρία"
         assert not errors, errors
+        ctx.close()
+
+
+def _luminance(rgb: str) -> float:
+    import re
+    r, g, b = (int(x) / 255 for x in re.findall(r"\d+", rgb)[:3])
+    f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4  # noqa: E731
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def _contrast(fg: str, bg: str) -> float:
+    a, b = sorted((_luminance(fg), _luminance(bg)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
+@pytest.mark.parametrize("color_scheme", ["light", "dark"])
+def test_dashboard_metric_cards_have_high_contrast(browser, tmp_path, synthetic_master, color_scheme):
+    """Λευκές κάρτες με σκούρο κείμενο — και όταν ο υπολογιστής είναι σε σκοτεινό θέμα (WCAG AA ≥ 4.5:1)."""
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100}, color_scheme=color_scheme)
+        page = ctx.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector('[data-testid="stMetric"]', timeout=30000)
+        page.wait_for_selector('[data-testid="stTab"], button[data-baseweb="tab"]', timeout=30000)
+        info = page.evaluate("""() => [...document.querySelectorAll('[data-testid="stMetric"]')].map(m => {
+            const cs = (sel) => getComputedStyle(m.querySelector(sel));
+            return {bg: getComputedStyle(m).backgroundColor, label: cs('[data-testid="stMetricLabel"] p').color,
+                    value: cs('[data-testid="stMetricValue"] div').color}; })""")
+        assert len(info) == 5
+        for card in info:
+            assert card["bg"] == "rgb(255, 255, 255)", card
+            assert _contrast(card["value"], card["bg"]) >= 7, card      # τιμή: πολύ υψηλή αντίθεση
+            assert _contrast(card["label"], card["bg"]) >= 4.5, card    # label: τουλάχιστον WCAG AA
+        tabs = page.evaluate("""() => [...document.querySelectorAll('[data-testid="stTab"], button[data-baseweb="tab"]')]
+            .map(t => ({fg: getComputedStyle(t.querySelector('p')).color, bg: getComputedStyle(t).backgroundColor}))""")
+        assert tabs and all(_contrast(t["fg"], t["bg"]) >= 4.5 for t in tabs), tabs
+        page.screenshot(path=str(tmp_path / f"dashboard-{color_scheme}.png"))
         ctx.close()

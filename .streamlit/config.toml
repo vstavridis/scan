@@ -10,5 +10,9 @@ gatherUsageStats = false
 toolbarMode = "minimal"
 
 [theme]
+# Πλήρως ορισμένο ανοιχτό θέμα: υψηλή αντίθεση ανεξάρτητα από το (σκοτεινό) θέμα του υπολογιστή.
 base = "light"
 primaryColor = "#15803d"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f4f6"
+textColor = "#111827"
