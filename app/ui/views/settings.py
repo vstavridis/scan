@@ -121,6 +121,46 @@ def _onedrive_section() -> None:
                     st.rerun()
                 except ServiceError as exc:
                     show_error(exc)
+            st.markdown("#### Έλεγχος πραγματικών διαφορών (χωρίς καμία αλλαγή)")
+            st.caption("Σύγκριση του online αρχείου με το αντίγραφο πριν από την εκκρεμή μεταφορά. "
+                       "Η σύγκριση διαβάζει μόνο τα δύο Excel και δεν τα αντικαθιστά.")
+            if st.button("🔎 Σύγκριση OneDrive με το ασφαλές αντίγραφο", key="onedrive_compare"):
+                try:
+                    with st.spinner("Συγκρίνω τις τιμές και τους τύπους κελιών όλων των φύλλων…"):
+                        st.session_state["onedrive_diff_report"] = onedrive.inspect_pending()
+                except ServiceError as exc:
+                    show_error(exc)
+            report = st.session_state.get("onedrive_diff_report")
+            if report:
+                st.write(f"Σύγκριση: έκδοση πριν από τη μεταφορά **v{report['original_version']}** "
+                         f"↔ online OneDrive · ενημερωμένη έκδοση Supabase **v{report['updated_version']}**")
+                if report["online_identical_after"]:
+                    st.success("Το online Excel έχει ήδη ακριβώς τα ίδια bytes με το ενημερωμένο Supabase. "
+                               "Πατήστε «Επανάληψη συγχρονισμού» για να επιβεβαιωθεί η έκδοση.")
+                elif report["online_identical_before"]:
+                    st.success("Το online Excel είναι ακριβώς ίδιο με το αντίγραφο πριν από τη μεταφορά. "
+                               "Ο συγχρονισμός μπορεί να επαναληφθεί χωρίς σύγκρουση περιεχομένου.")
+                elif report["cell_values_equal"]:
+                    st.warning("Όλες οι τιμές και οι τύποι κελιών είναι ίδιοι, αλλά τα αρχεία διαφέρουν "
+                               "σε άλλα δεδομένα. Δεν γίνεται αυτόματη αντικατάσταση: μπορεί να έχουν "
+                               "αλλάξει μορφοποιήσεις ή άλλα στοιχεία.")
+                else:
+                    st.error(f"Βρέθηκαν {report['differences']}"
+                             + (" ή περισσότερες" if report["truncated"] else "")
+                             + " διαφορές σε τιμές/τύπους κελιών. Απαιτείται έλεγχος πριν τη συγχώνευση.")
+                if report["etag_changed"]:
+                    st.caption("Το OneDrive έχει και διαφορετικό αναγνωριστικό έκδοσης (ETag).")
+                st.caption(report["notes"])
+                if report["per_sheet"]:
+                    with st.expander("Διαφορές ανά φύλλο", expanded=True):
+                        st.dataframe(pd.DataFrame(report["per_sheet"]).rename(columns={
+                            "sheet": "Φύλλο", "different": "Κελιά με διαφορά"}),
+                            hide_index=True, width="stretch")
+                if report["examples"]:
+                    st.write("Ενδεικτικά διαφορετικά κελιά:")
+                    st.dataframe(pd.DataFrame(report["examples"]).rename(columns={
+                        "sheet": "Φύλλο", "cell": "Κελί", "before": "Πριν από μεταφορά",
+                        "online": "Στο OneDrive"}), hide_index=True, width="stretch")
         else:
             st.caption("Οι αλλαγές έχουν συγχρονιστεί. Εξωτερικές τροποποιήσεις ελέγχονται πριν από τη μεταφορά.")
     st.caption("Δοκιμή προσωπικού OneDrive. Το ιστορικό και τα backups παραμένουν στο Supabase.")
