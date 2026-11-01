@@ -277,6 +277,7 @@ def _upload(drive: str, item: str, expected_etag: str, data: bytes, token: str) 
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (
         host.endswith(".1drv.com") or host.endswith(".sharepoint.com") or host.endswith(".onedrive.com")
+        or host in {"api.onedrive.com", "storage.live.com"} or host.endswith(".storage.live.com")
     ):
         raise ServiceError("Η Microsoft επέστρεψε μη έγκυρη διεύθυνση upload.")
     total = len(data)
