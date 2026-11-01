@@ -359,8 +359,36 @@ def _upload(drive: str, item: str, expected_etag: str, data: bytes, token: str) 
             raise ServiceError("Διακόπηκε η μεταφορά του ενημερωμένου Excel στο OneDrive.") from None
 
 
+def _baseline_sha(import_id: int, synced_version: int) -> str:
+    """SHA of the durable workbook version that the remote file is expected to contain.
+
+    Read from the completed transfer's journal, not the current working workbook.
+    This permits an eTag-only metadata change while refusing to overwrite any
+    actual external changes to the OneDrive file.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT base_object, excel_before_sha256 FROM transfer_operations "
+            "WHERE import_id=? AND base_version=? AND status='completed' ORDER BY id LIMIT 1",
+            (import_id, synced_version),
+        ).fetchone()
+    if not row or not row["base_object"] or not row["excel_before_sha256"]:
+        raise Conflict("Δεν βρέθηκε αξιόπιστη προηγούμενη έκδοση για σύγκριση με το OneDrive. "
+                       "Καμία αλλαγή δεν έγινε στο online αρχείο.")
+    # Check the actual immutable Supabase backup as well as the journal hash.
+    baseline = cached_get(row["base_object"], row["excel_before_sha256"]).read_bytes()
+    if sha256_bytes(baseline) != row["excel_before_sha256"]:
+        raise Conflict("Το αντίγραφο ασφαλείας του Excel δεν συμφωνεί με το ιστορικό μεταφοράς.")
+    return row["excel_before_sha256"]
+
+
 def sync_pending_under_lease() -> bool:
-    """Call while holding the Excel lease. Raises rather than overwrites a changed remote file."""
+    """Publish an already-committed version safely. Caller holds the Excel lease.
+
+    Never assume that a changed eTag means changed content; conversely never ignore
+    a content change merely because the eTag happens to be equal. The download is
+    compared against the immutable pre-transfer workbook before overwriting it.
+    """
     imp = catalog.active_import()
     if not imp:
         raise ServiceError("Δεν υπάρχει ενεργό Excel.")
@@ -372,26 +400,47 @@ def sync_pending_under_lease() -> bool:
         return True
     if int(b["synced_version"]) > current_version:
         raise Conflict("Ασυμφωνία εκδόσεων OneDrive. Απαιτείται έλεγχος.")
+
     token = _access_token()
     drive, item = b["drive_id"], b["item_id"]
     data = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
     remote, meta = _stable_download(drive, item, token)
-    if sha256_bytes(remote) != imp["working_sha256"]:
+    remote_sha = sha256_bytes(remote)
+    target_sha = imp["working_sha256"]
+
+    if remote_sha != target_sha:
+        baseline_sha = _baseline_sha(int(imp["id"]), int(b["synced_version"]))
+        if remote_sha != baseline_sha:
+            raise Conflict(
+                "Το online Excel έχει ΔΙΑΦΟΡΕΤΙΚΟ ΠΕΡΙΕΧΟΜΕΝΟ από την έκδοση πριν τη μεταφορά. "
+                "Δεν θα αντικαταστήσουμε αλλαγές που μπορεί να έγιναν στο OneDrive. "
+                "Η ενημερωμένη έκδοση βρίσκεται ασφαλής στο Supabase (Ρυθμίσεις → Λήψεις). "
+                "Χρειάζεται σύγκριση των δύο Excel πριν συνεχίσουμε."
+            )
         if meta["eTag"] != b["etag"]:
-            raise Conflict("Το OneDrive άλλαξε εξωτερικά. Δεν αντικαθιστούμε τις αλλαγές. "
-                           "Ελέγξτε το αρχείο και το εκκρεμές αντίγραφο στο Supabase.")
-        _upload(drive, item, b["etag"], data, token)
+            log.info("OneDrive eTag drift with identical workbook bytes; use verified latest eTag for upload")
+        # If-Match protects against a new concurrent edit after _stable_download.
+        _upload(drive, item, meta["eTag"], data, token)
         remote, meta = _stable_download(drive, item, token)
-        if sha256_bytes(remote) != imp["working_sha256"]:
-            raise ServiceError("Ο έλεγχος μετά το ανέβασμα απέτυχε. Ο συγχρονισμός παραμένει εκκρεμής.")
+        if sha256_bytes(remote) != target_sha:
+            raise ServiceError(
+                "Ο έλεγχος μετά το ανέβασμα απέτυχε. Η μεταφορά στο Supabase διατηρήθηκε· "
+                "το OneDrive παραμένει σε εκκρεμότητα."
+            )
+
+    # The uploaded version is identical, or an earlier upload actually succeeded
+    # but its acknowledgement/DB update was lost. Mark it synced without re-upload.
     b["etag"] = meta["eTag"]
     b["synced_version"] = current_version
     with transaction() as db:
         row = db.execute("SELECT value FROM app_settings WHERE key=?", (BOUND_KEY,)).fetchone()
         old = json.loads(row["value"]) if row else None
-        if not old or int(old["import_id"]) != int(imp["id"]):
-            raise Conflict("Το ενεργό Excel άλλαξε κατά τον συγχρονισμό.")
-        db.execute("UPDATE app_settings SET value=? WHERE key=?", (json.dumps(b, ensure_ascii=False), BOUND_KEY))
+        if (not old or int(old["import_id"]) != int(imp["id"])
+                or int(old["synced_version"]) != int(b["synced_version"]) and
+                   int(old["synced_version"]) != int(imp["working_version"]) - 1):
+            raise Conflict("Η κατάσταση συγχρονισμού άλλαξε. Ελέγξτε την έκδοση του OneDrive.")
+        db.execute("UPDATE app_settings SET value=? WHERE key=?",
+                   (json.dumps(b, ensure_ascii=False), BOUND_KEY))
     return True
 
 
