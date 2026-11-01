@@ -9,7 +9,6 @@ Never treat a match as permission to overwrite a remote file automatically.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from itertools import zip_longest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
