@@ -161,6 +161,32 @@ def _onedrive_section() -> None:
                     st.dataframe(pd.DataFrame(report["examples"]).rename(columns={
                         "sheet": "Φύλλο", "cell": "Κελί", "before": "Πριν από μεταφορά",
                         "online": "Στο OneDrive"}), hide_index=True, width="stretch")
+                if (report["cell_values_equal"] and report["sheet_names_equal"]
+                        and not report["truncated"] and not report["online_identical_after"]):
+                    st.markdown("#### Αποκατάσταση μίας εκκρεμούς μεταφοράς")
+                    st.info("Η εφαρμογή μπορεί να εφαρμόσει την ήδη καταγεγραμμένη μεταφορά "
+                            "πάνω στην τρέχουσα online έκδοση, διατηρώντας τα υπόλοιπα "
+                            "στοιχεία της, αφού κρατήσει δύο επαληθευμένα αντίγραφα στο Supabase. "
+                            "Θα ελέγξει ότι το αποτέλεσμα συμφωνεί με την αποθηκευμένη μεταφορά. "
+                            "Δεν κάνει αυτόματη αντικατάσταση παλαιού αρχείου.")
+                    recovery_ok = st.checkbox(
+                        "Έχω κλείσει το Excel Online και επιτρέπω μία αποκατάσταση "
+                        "της εκκρεμούς μεταφοράς στο δοκιμαστικό αρχείο με αντίγραφα ασφαλείας.",
+                        key="onedrive_recovery_confirm")
+                    if st.button("Αποκατάσταση εκκρεμούς μεταφοράς στο OneDrive",
+                                 type="primary", disabled=not recovery_ok,
+                                 key="onedrive_recovery_button"):
+                        from app.services.onedrive_reconcile import recover_single_pending
+                        try:
+                            with st.spinner("Ελέγχω και συγχρονίζω την εκκρεμή μεταφορά…"):
+                                repaired = recover_single_pending(principal().actor)
+                            st.session_state.pop("onedrive_diff_report", None)
+                            st.success(f"Η μεταφορά {repaired['barcode']} συγχρονίστηκε στο OneDrive. "
+                                       f"Ενεργή έκδοση v{repaired['new_version']}. "
+                                       "Το προηγούμενο online Excel διατηρήθηκε ως backup.")
+                            st.rerun()
+                        except ServiceError as exc:
+                            show_error(exc)
         else:
             st.caption("Οι αλλαγές έχουν συγχρονιστεί. Εξωτερικές τροποποιήσεις ελέγχονται πριν από τη μεταφορά.")
     st.caption("Δοκιμή προσωπικού OneDrive. Το ιστορικό και τα backups παραμένουν στο Supabase.")
