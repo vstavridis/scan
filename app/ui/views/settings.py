@@ -96,6 +96,9 @@ def _onedrive_section() -> None:
     from app.services import onedrive
 
     st.subheader("OneDrive — online Excel")
+    recovery_msg = st.session_state.pop("onedrive_recovery_success", None)
+    if recovery_msg:
+        st.success(recovery_msg)
     if not onedrive.configured():
         st.info("Προσθέστε [onedrive] client_id, client_secret, redirect_uri στα Streamlit Secrets.")
         return
@@ -181,9 +184,10 @@ def _onedrive_section() -> None:
                             with st.spinner("Ελέγχω και συγχρονίζω την εκκρεμή μεταφορά…"):
                                 repaired = recover_single_pending(principal().actor)
                             st.session_state.pop("onedrive_diff_report", None)
-                            st.success(f"Η μεταφορά {repaired['barcode']} συγχρονίστηκε στο OneDrive. "
-                                       f"Ενεργή έκδοση v{repaired['new_version']}. "
-                                       "Το προηγούμενο online Excel διατηρήθηκε ως backup.")
+                            st.session_state["onedrive_recovery_success"] = (
+                                f"Η μεταφορά {repaired['barcode']} συγχρονίστηκε στο OneDrive. "
+                                f"Ενεργή έκδοση v{repaired['new_version']}. "
+                                "Το προηγούμενο online Excel διατηρήθηκε ως backup.")
                             st.rerun()
                         except ServiceError as exc:
                             show_error(exc)
