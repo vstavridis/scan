@@ -52,6 +52,8 @@ def _do(action: str, item: dict[str, Any], **payload: Any) -> None:
             _flash("success", msg)
             if res.get("warning"):
                 _flash("warning", "⚠ " + res["warning"])
+            if res.get("onedrive_warning"):
+                _flash("error", "⚠ " + res["onedrive_warning"])
         elif action == "remove":
             backend.remove_item(p, item["id"], payload.get("reason", ""))
             _flash("info", f"Το {item['barcode']} αφαιρέθηκε από την ενεργή λίστα (καταγράφηκε στο ιστορικό).")
