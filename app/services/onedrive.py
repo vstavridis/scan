@@ -124,13 +124,33 @@ def _graph(token: str, method: str, path: str, **kwargs) -> httpx.Response:
             raise ServiceError("Η Microsoft αρνήθηκε πρόσβαση στο Excel. Ελέγξτε τα Files.ReadWrite και ότι το αρχείο είναι δικό σας.")
         if r.status_code == 404:
             raise ServiceError("Το αρχείο OneDrive δεν βρέθηκε. Ελέγξτε τον σύνδεσμο.")
-        r.raise_for_status()
+        if r.status_code == 423:
+            raise ServiceError("Το OneDrive αναφέρει ότι το Excel είναι κλειδωμένο (HTTP 423). "
+                               "Κλείστε το στο Excel Online και επαναλάβετε τον συγχρονισμό.")
+        if r.status_code == 429:
+            raise ServiceError("Η Microsoft περιόρισε προσωρινά τα αιτήματα (HTTP 429). "
+                               "Δοκιμάστε ξανά αργότερα.")
+        if r.status_code >= 400:
+            # Expose only bounded HTTP status and a validated Microsoft error CODE, not
+            # the response body: raw Graph errors may contain internal IDs and URLs.
+            errcode = ""
+            try:
+                import re
+                value = r.json().get("error", {}).get("code", "")
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", value):
+                    errcode = " / " + value
+            except (ValueError, AttributeError, TypeError):
+                pass
+            raise ServiceError(f"Το OneDrive απέρριψε το αίτημα (HTTP {r.status_code}{errcode}). "
+                               "Το ενημερωμένο Excel παραμένει ασφαλές στο Supabase.")
         return r
     except (Conflict, ServiceError):
         raise
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.TimeoutException:
+        raise ServiceError("Έληξε ο χρόνος αναμονής της Microsoft. Το αρχείο Supabase παραμένει ασφαλές.") from None
+    except httpx.HTTPError as exc:
         log.warning("OneDrive Graph request failed: %s", type(exc).__name__)
-        raise ServiceError("Δεν ήταν δυνατή η επικοινωνία με το Microsoft OneDrive. Δοκιμάστε ξανά.") from None
+        raise ServiceError("Δεν ήταν δυνατή η επικοινωνία με το OneDrive. Δοκιμάστε ξανά.") from None
 
 
 def finish_authorization(code: str, state: str) -> str:
