@@ -7,3 +7,5 @@ httpx==0.28.1              # Supabase Storage REST API
 openpyxl==3.1.5            # εξαγωγή ιστορικού σε Excel
 pandas==3.0.5
 tzdata>=2024.1             # ζώνη ώρας Europe/Athens
+
+cryptography>=43,<48       # encrypted OAuth refresh tokens
