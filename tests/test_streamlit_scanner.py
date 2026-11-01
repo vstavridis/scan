@@ -275,7 +275,6 @@ def test_two_computers_stay_in_sync(browser, tmp_path, synthetic_master):
         print(f"\n[μέτρηση] εμφάνιση στη γραμματεία σε {time.perf_counter() - t:.1f}s")
         desk.get_by_role("tab", name="Αναλυτική λίστα").click()
         desk.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
-        desk.get_by_role("button", name="✔ Ναι, μεταφορά στα Σβησμένα").click()
         desk.wait_for_selector("text=μεταφέρθηκε στα Σβησμένα", timeout=60000)
         # η αποθήκη βλέπει την αλλαγή χωρίς καμία ενέργεια
         scanner_page.wait_for_function("document.querySelectorAll('.whs-list li').length === 1", timeout=15000)
@@ -353,7 +352,7 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
             page.wait_for_selector(marker, timeout=30000)
             assert page.locator('[data-testid="stException"]').count() == 0, link
         assert "user=" in page.url  # το όνομα μένει στο URL (σελιδοδείκτης)
-        # σκανάρισμα + μεταφορά χωρίς login, με επιβεβαίωση και καταγραφή του χρήστη
+        # σκανάρισμα + μεταφορά με ένα κλικ, χωρίς login ή δεύτερη επιβεβαίωση
         page.get_by_role("link", name="Scanner / Αποθήκη").click()
         page.wait_for_selector(".whs-root")
         wait_connected(page)
@@ -363,8 +362,6 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         page.get_by_role("link", name="Γραμματεία / Dashboard").click()
         page.get_by_role("tab", name="Αναλυτική λίστα").click()
         page.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
-        page.wait_for_selector("text=Επιβεβαίωση μεταφοράς", timeout=15000)   # απαιτείται επιβεβαίωση
-        page.get_by_role("button", name="✔ Ναι, μεταφορά στα Σβησμένα").click()
         page.wait_for_selector("text=μεταφέρθηκε στα Σβησμένα", timeout=60000)
         log = backend.audit_log(login("admin"))
         assert next(r for r in log if r["action"] == "transfer.completed")["actor"] == "Μαρία"
