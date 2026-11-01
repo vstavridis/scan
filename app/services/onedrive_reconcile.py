@@ -168,8 +168,10 @@ def recover_single_pending(actor: str) -> dict:
             candidate = get_store().get(record["candidate_obj"])
             if sha256_bytes(candidate) != record["candidate_sha"]:
                 raise Conflict("Το προετοιμασμένο αντίγραφο αποκατάστασης δεν είναι έγκυρο.")
-            if sha256_bytes(remote) == record["candidate_sha"]:
-                # PUT definitely succeeded; acknowledge safely, no second upload.
+            if sha256_bytes(remote) == record["candidate_sha"] or _safe_cells_match(remote, candidate):
+                # Microsoft may repackage uploaded XLSX bytes. If the online file
+                # already has exactly the expected cell/formula state, DO NOT
+                # overwrite it again. Adopt the actual online bytes instead.
                 return _finalize(imp, b, remote, etag, record, actor)
             if sha256_bytes(remote) != record["remote_sha"] or etag != record["remote_etag"]:
                 raise Conflict("Το OneDrive άλλαξε μετά την προετοιμασία. "
