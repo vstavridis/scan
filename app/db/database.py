@@ -101,23 +101,46 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+POOL_MAX_SIZE = 4          # ήπιο προς τον Supabase Session pooler (περιορισμένο pool size στο free plan)
+POOL_TIMEOUT_S = 15.0
+
+
+def _preflight(url: str) -> None:
+    """Μία απευθείας σύνδεση πριν από το pool: σε αποτυχία, raise με την ΠΡΑΓΜΑΤΙΚΗ αιτία."""
+    import psycopg
+
+    from app.db.diagnostics import DatabaseConnectionError, diagnose
+
+    try:
+        with psycopg.connect(url, connect_timeout=10, autocommit=True, prepare_threshold=None,
+                             application_name="warehouse-preflight") as c:
+            c.execute("SELECT 1")
+    except Exception:
+        raise DatabaseConnectionError(diagnose(url)) from None
+
+
 def _pg_pool(url: str):
     global _pool, _pool_url
     if _pool is None or _pool_url != url:
         from psycopg.rows import dict_row
         from psycopg_pool import ConnectionPool
 
-        _pool = ConnectionPool(
+        _preflight(url)
+        pool = ConnectionPool(
             url,
             min_size=1,
-            max_size=8,
+            max_size=POOL_MAX_SIZE,
             kwargs={"row_factory": dict_row, "autocommit": True, "prepare_threshold": None,
-                    "connect_timeout": 15, "application_name": "warehouse-streamlit"},
+                    "connect_timeout": 10, "application_name": "warehouse-streamlit"},
             check=ConnectionPool.check_connection,
-            open=True,
-            timeout=30,
+            max_idle=300,           # κλείνει αδρανείς συνδέσεις (λιγότερη πίεση στον pooler)
+            reconnect_timeout=60,
+            open=False,
+            timeout=POOL_TIMEOUT_S,
+            name="warehouse",
         )
-        _pool_url = url
+        pool.open(wait=True, timeout=POOL_TIMEOUT_S)
+        _pool, _pool_url = pool, url
     return _pool
 
 
@@ -134,8 +157,38 @@ def _raw() -> Iterator[Conn]:
     s = get_settings()
     _rt()  # έλεγχος σύνδεσης του pool
     if s.database_url:
-        with _pg_pool(s.database_url).connection() as c:
+        from psycopg_pool import PoolTimeout
+
+        from app.db.diagnostics import DatabaseConnectionError, diagnose
+
+        try:
+            pool = _pg_pool(s.database_url)
+        except PoolTimeout:
+            close_pool()
+            raise DatabaseConnectionError(diagnose(s.database_url)) from None
+        try:
+            cm = pool.connection()
+            c = cm.__enter__()
+        except PoolTimeout:
+            # Το pool δεν έδωσε σύνδεση: διάγνωση με ανεξάρτητη σύνδεση για την πραγματική αιτία.
+            d = diagnose(s.database_url)
+            if d.ok:
+                stats = pool.get_stats()
+                d.category = "exhausted"
+                d.summary = (f"Όλες οι συνδέσεις του pool ({stats.get('pool_size', '?')}/{POOL_MAX_SIZE}) είναι "
+                             f"απασχολημένες· η βάση απαντά κανονικά σε νέα σύνδεση.")
+                from app.db.diagnostics import HINTS
+                d.hints = HINTS["exhausted"]
+            else:
+                close_pool()  # π.χ. άλλαξε ο κωδικός: νέο pool στην επόμενη προσπάθεια
+            raise DatabaseConnectionError(d) from None
+        try:
             yield Conn(c, "pg")
+        except BaseException as exc:
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            cm.__exit__(None, None, None)
     elif s.dev_sqlite_path:
         s.dev_sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         c = _sqlite_connect(s.dev_sqlite_path)

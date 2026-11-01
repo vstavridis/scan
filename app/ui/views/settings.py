@@ -182,6 +182,16 @@ def page() -> None:
     for problem in health["problems"]:
         st.error(problem)
     st.caption(f"Βάση δεδομένων: {health['database']} · Αρχεία: {health.get('storage', '')}")
+    with st.expander("Διάγνωση σύνδεσης βάσης"):
+        st.caption("Ανεξάρτητη δοκιμαστική σύνδεση: ρυθμίσεις → DNS → TCP → PostgreSQL. "
+                   "Δεν εμφανίζονται κωδικοί ή το connection string.")
+        if st.button("Εκτέλεση διάγνωσης"):
+            d = backend.diagnose_database(p)
+            (st.success if d.ok else st.error)(f"**{d.title}** — {d.summary} ({d.elapsed_ms} ms)")
+            for line in d.details:
+                st.markdown(f"- {line}")
+            for hint in d.hints:
+                st.info(hint)
     _active_import_box(imports)
     st.divider()
     _upload_section()

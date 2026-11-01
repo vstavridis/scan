@@ -30,7 +30,6 @@ sys.path.insert(0, str(ROOT))
 from app.auth import Principal  # noqa: E402
 from tests.fixtures.make_fixture import build  # noqa: E402
 
-PASSWORDS = {"admin": "admin-pw", "secretary": "sec-pw", "scanner": "scan-pw"}
 
 
 def sha256(path: Path) -> str:
@@ -101,10 +100,7 @@ def configure_env(data_dir: Path, db_url: str | None = None) -> dict[str, str]:
     env = {
         "APP_DEV_STORAGE_DIR": str(data_dir / "storage"),
         "APP_CACHE_DIR": str(data_dir / "cache"),
-        "APP_ADMIN_PASSWORD": PASSWORDS["admin"],
-        "APP_SECRETARY_PASSWORD": PASSWORDS["secretary"],
-        "APP_SCANNER_PASSWORD": PASSWORDS["scanner"],
-        "APP_SECRET_KEY": "test-secret-key-0123456789",
+        "APP_SUPABASE_BUCKET": "warehouse-excel",
     }
     if db_url:
         env["APP_DATABASE_URL"] = db_url
@@ -153,8 +149,7 @@ def app_env(request, tmp_path: Path) -> Iterator[Path]:
 
 def login(role: str) -> Principal:
     from app import backend
-    p, _token = backend.login(role, PASSWORDS[role], f"test-{role}")
-    return p
+    return backend.identity(f"test-{role}")   # χωρίς κωδικούς: μόνο ταυτότητα για το audit
 
 
 def activate_workbook(path: Path, confirm: bool = False) -> dict:

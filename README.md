@@ -32,8 +32,9 @@ Web εφαρμογή που ανοίγει **μόνο από browser**. Δεν �
 
 * **Ένα deployment**: χωρίς FastAPI, Uvicorn ή άλλο server. Το Supabase χρησιμοποιείται μόνο για αποθήκευση.
 * **Κοινή πηγή αλήθειας** η PostgreSQL. Η αποθήκη και η γραμματεία βλέπουν τα ίδια δεδομένα, και το `st.session_state` δεν χρησιμοποιείται ως βάση.
-* **Credentials μόνο στα Streamlit Secrets.** Ο browser δεν βλέπει ποτέ κλειδιά Supabase. Κρατά μόνο ένα υπογεγραμμένο token ρόλου, για το «Να με θυμάται αυτός ο υπολογιστής».
-* **Δικαιώματα στην Python**: κάθε ενέργεια περνά από το `app/backend.py`, που ελέγχει τον ρόλο (Scanner / Γραμματεία / Admin) ανεξάρτητα από τα κουμπιά.
+* **Credentials μόνο στα Streamlit Secrets**, μόνο στον Python server. Ο browser δεν βλέπει ποτέ κλειδιά ή connection string. Δεν υπάρχουν δημόσια API endpoints.
+* **Πρόσβαση: Private app στο Streamlit Community Cloud**. Μπαίνουν μόνο προσκεκλημένοι χρήστες, και δεν υπάρχει εσωτερικό login ή κωδικοί. Όλοι οι προσκεκλημένοι βλέπουν όλες τις οθόνες (Scanner, Γραμματεία, Ιστορικό, Ρυθμίσεις).
+* **Ιστορικό ενεργειών (audit)**: κάθε ενέργεια περνά από το `app/backend.py` και καταγράφεται με το email του χρήστη (από το Streamlit Cloud) και το όνομα που δηλώνει στην πλαϊνή στήλη. Η μεταφορά Excel ζητά πάντα επιβεβαίωση.
 
 ### Πώς δουλεύει η σάρωση μέσα στο Streamlit
 
@@ -98,30 +99,42 @@ Project URL: `https://uwzqfxvyjjprrqaxuztx.supabase.co` · Bucket: `warehouse-ex
    * **Repository**: `vstavridis/scan` · **Branch**: `main` (ή το παραπάνω) · **Main file path**: `streamlit_app.py`
    * **App URL**: π.χ. `apothiki-barcode` → `https://apothiki-barcode.streamlit.app`
 3. **Advanced settings** → **Python version: 3.12** → **Secrets**: επικολλήστε το
-   [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) συμπληρωμένο:
-   `[database] url` (βήμα 2.2), `[supabase] service_key` (βήμα 2.3), `[auth] secret_key` (τυχαίο ≥32 χαρακτήρες) και
-   οι τρεις κωδικοί ρόλων. Το `url` και το `bucket` του Supabase είναι ήδη συμπληρωμένα.
+   [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) συμπληρωμένο. Απαιτούνται **μόνο**:
+
+   ```toml
+   [database]
+   url = "postgresql://postgres.uwzqfxvyjjprrqaxuztx:<κωδικός>@aws-…-<region>.pooler.supabase.com:5432/postgres?sslmode=require"
+
+   [supabase]
+   url = "https://uwzqfxvyjjprrqaxuztx.supabase.co"
+   service_key = "sb_secret_…"
+   bucket = "warehouse-excel"
+   ```
+   Δεν χρειάζεται `[auth]` section. Αν υπάρχει από παλιότερη ρύθμιση, αγνοείται και μπορεί να διαγραφεί.
 4. **Deploy** (πρώτη εγκατάσταση ~2–3 λεπτά). Αν λείπει κάτι, εμφανίζεται σελίδα «απαιτείται ρύθμιση» με ακριβή
    λίστα. Logs: *Manage app → Logs*. Αλλαγή Secrets αργότερα: *⋮ → Settings → Secrets* (η εφαρμογή ξεκινά ξανά).
-5. **Έλεγχος σύνδεσης**: συνδεθείτε ως Διαχειριστής → **Ρυθμίσεις**: πάνω-πάνω γράφει
-   «PostgreSQL … (Supabase) — σύνδεση OK · Supabase Storage, bucket «warehouse-excel»». Αν υπάρχει πρόβλημα
-   (λάθος κωδικός, bucket δημόσιο, λάθος key) εμφανίζεται με κόκκινο.
-
-**Ορατότητα**: *Public* = όποιος έχει το link βλέπει τη σελίδα σύνδεσης (τα δεδομένα τα προστατεύουν οι κωδικοί ρόλων).
-Για επιπλέον προστασία: *Private* + πρόσκληση των email των χρηστών (θα συνδέονται πρώτα με Google/GitHub).
+5. **Private app**: στην εφαρμογή → **Share** (πάνω δεξιά) → *Who can view this app* → **Only specific people**
+   → προσθέστε τα email των χρηστών (αποθήκη, γραμματεία, διαχειριστής). Κάθε χρήστης συνδέεται μία φορά με
+   λογαριασμό Google/GitHub/email στο Streamlit και μετά ανοίγει την εφαρμογή κατευθείαν.
+6. **Έλεγχος σύνδεσης**: **Ρυθμίσεις** → πάνω-πάνω γράφει
+   «PostgreSQL … (Supabase) — σύνδεση OK · Supabase Storage, bucket «warehouse-excel»». Αν κάτι δεν λειτουργεί,
+   εμφανίζεται με κόκκινο. Το **Διάγνωση σύνδεσης βάσης** δείχνει βήμα-βήμα την αιτία (βλ. ενότητα 7).
 
 ### Πρώτη χρήση
 
-1. **Admin**: URL → Ρόλος «Διαχειριστής» → **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
-2. **Αποθήκη** (PC με τον δέκτη): ίδιο URL → «Αποθήκη (Scanner)» → τσεκαρισμένο «Να με θυμάται» → **Πλήρης Οθόνη** (ή F9)
-   → **Δοκιμή ήχου** → σκανάρετε.
-3. **Γραμματεία**: ίδιο URL → «Γραμματεία» → Dashboard.
+1. **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
+2. **Αποθήκη** (PC με τον δέκτη): ανοίξτε τη διεύθυνση σάρωσης (πίνακας παρακάτω) και αποθηκεύστε τη ως σελιδοδείκτη
+   → **Πλήρης Οθόνη** (ή F9) → **Δοκιμή ήχου** → σκανάρετε.
+3. **Γραμματεία**: η κεντρική διεύθυνση ανοίγει στο Dashboard.
 
-| Ποιος | Διεύθυνση | Ρόλος |
-|---|---|---|
-| Υπάλληλος αποθήκης | `https://<app>.streamlit.app` | Αποθήκη (Scanner) |
-| Γραμματεία | `https://<app>.streamlit.app` | Γραμματεία |
-| Διαχειριστής | `https://<app>.streamlit.app` → Ρυθμίσεις | Διαχειριστής |
+Το όνομα στην πλαϊνή στήλη («Όνομα χρήστη / συσκευής») είναι προαιρετικό. Γράφεται στο ιστορικό μαζί με το email
+και μένει στη διεύθυνση (`?user=…`), ώστε να ισχύει και μετά από ανανέωση ή από σελιδοδείκτη.
+
+| Ποιος | Διεύθυνση (σελιδοδείκτης) |
+|---|---|
+| Υπάλληλος αποθήκης | `https://<app>.streamlit.app/scanner?user=Αποθήκη%20PC1` |
+| Γραμματεία | `https://<app>.streamlit.app/?user=Μαρία` |
+| Ιστορικό / Ρυθμίσεις | από το μενού αριστερά |
 
 ---
 
@@ -153,13 +166,13 @@ requirements.txt              εξαρτήσεις (δοκιμασμένες ε�
 .streamlit/secrets.toml.example  πρότυπο Secrets (χωρίς πραγματικούς κωδικούς)
 supabase/migrations/001_warehouse_init.sql  πλήρες SQL migration (πίνακες, RLS, private bucket)
 app/backend.py                ενέργειες UI + έλεγχος δικαιωμάτων
-app/auth.py                   ρόλοι, υπογεγραμμένα tokens
+app/auth.py                   ταυτότητα χρήστη για το audit (χωρίς κωδικούς)
 app/config.py                 ρυθμίσεις από Secrets/env
 app/storage.py                Supabase Storage (REST) / τοπικός φάκελος για tests
-app/db/                       σύνδεση PostgreSQL/SQLite, σχήματα (schema_postgres.sql)
+app/db/                       σύνδεση PostgreSQL/SQLite, σχήματα, διάγνωση σύνδεσης (diagnostics.py)
 app/excel/                    Excel engine (ανάγνωση, ασφαλής μεταφορά, τύποι) — αμετάβλητος
 app/services/                 scans, catalog, aggregation, transfer, history, locks, settings
-app/ui/components/            Custom Component v2: οθόνη σάρωσης (assets/*.js|css|html), auth bridge
+app/ui/components/            Custom Component v2: οθόνη σάρωσης (assets/*.js|css|html)
 app/ui/views/                 σελίδες: dashboard, scanner, history, settings
 tests/                        pytest (backend σε SQLite+PostgreSQL, Excel, Supabase client, Streamlit+Chromium)
 tools/scanner_simulator.py    simulator υψηλής ταχύτητας
@@ -208,7 +221,8 @@ Streamlit Cloud (websocket, Ελλάδα ↔ ΗΠΑ ~120–180 ms) και το �
   δεν χάνονται και δεν διπλασιάζονται (UNIQUE event_id).
 
 **Πώς να το επιβεβαιώσετε μετά το deploy** (από οποιονδήποτε υπολογιστή με Python — όχι από τα PC της αποθήκης):
-`python tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app --password <SCANNER_PW> --count 150`
+`python tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app --headed --count 150`
+(Private app: στο παράθυρο που ανοίγει συνδεθείτε πρώτα στο Streamlit με προσκεκλημένο email)
 (χρησιμοποιεί δοκιμαστικά barcode `SIM0001…`, που θα εμφανιστούν ως «άγνωστα» — αφαιρέστε τα μετά από τη Γραμματεία).
 Ή απλώς σκανάρετε γρήγορα 30–50 ετικέτες και κοιτάξτε τον μετρητή «εκκρεμή»: πρέπει να μηδενίζει μέσα σε λίγα δευτερόλεπτα.
 
@@ -219,3 +233,33 @@ Streamlit Cloud (websocket, Ελλάδα ↔ ΗΠΑ ~120–180 ms) και το �
 4. Αφιερωμένοι πόροι (Streamlit in Snowflake ή οποιοσδήποτε container host για το ίδιο `streamlit_app.py`).
 5. Μόνο ως έσχατη λύση: απευθείας αποστολή από τον browser σε Supabase Edge Function — απαιτεί δημόσιο κλειδί στον
    browser και ξεχωριστό backend, γι' αυτό **δεν** υλοποιήθηκε.
+
+## 7. Πρόβλημα σύνδεσης βάσης (π.χ. `PoolTimeout`)
+
+Παλιότερα, ένα λάθος στη σύνδεση εμφανιζόταν μόνο ως `PoolTimeout: couldn't get a connection after 30.00 sec`.
+Το connection pool της psycopg ξαναδοκίμαζε στο παρασκήνιο και έκρυβε την αιτία. Τώρα:
+
+* Πριν δημιουργηθεί το pool, γίνεται **μία ανεξάρτητη σύνδεση psycopg**. Αν αποτύχει, η εφαρμογή δείχνει
+  αμέσως (σε λίγα δευτερόλεπτα) την **πραγματική αιτία** και τι να διορθώσετε.
+* Αν το pool δεν δώσει σύνδεση στη διάρκεια της εργασίας, γίνεται πάλι ανεξάρτητη δοκιμή, για να ξεχωρίσει
+  «η βάση δεν απαντά» από «όλες οι συνδέσεις του pool είναι απασχολημένες».
+* Η διάγνωση τρέχει και χειροκίνητα: **Ρυθμίσεις → Διάγνωση σύνδεσης βάσης → Εκτέλεση διάγνωσης**. Ελέγχει
+  βήμα-βήμα: μορφή connection string → DNS → TCP → PostgreSQL (TLS + κωδικός).
+* **Δεν εμφανίζονται ούτε καταγράφονται** κωδικοί, πλήρες connection string ή API keys. Εμφανίζονται μόνο host, port,
+  username (περιέχει το δημόσιο project ref), database και sslmode.
+
+| Διάγνωση | Συνήθης αιτία | Τι να κάνετε |
+|---|---|---|
+| Λάθος κωδικός βάσης | λάθος password, ή ειδικοί χαρακτήρες χωρίς URL-encoding, ή έμεινε `[YOUR-PASSWORD]` | Supabase → Project Settings → Database → *Reset database password*· ειδικοί χαρακτήρες: `@`→`%40`, `#`→`%23`, `/`→`%2F`, `:`→`%3A` |
+| Λάθος username ή pooler host («Tenant or user not found») | username χωρίς `.uwzqfxvyjjprrqaxuztx` ή host άλλης περιοχής | αντιγράψτε ξανά ΑΚΡΙΒΩΣ το URI από **Connect → Session pooler** |
+| DNS | λάθος/τυπογραφικό host | ίδιο με παραπάνω |
+| Δίκτυο / timeout | «Direct connection» (`db.<ref>.supabase.co`, μόνο IPv6), ή project σε παύση | Session pooler (θύρα 5432)· Supabase → *Restore project* αν είναι Paused |
+| SSL | λείπει ή είναι λάθος το `sslmode` | προσθέστε `?sslmode=require` |
+| Εξαντλημένες συνδέσεις | όριο του Session pooler (free plan), ή πολλές επανεκκινήσεις | περιμένετε 1–2 λεπτά· η εφαρμογή χρησιμοποιεί έως 4 συνδέσεις και κλείνει τις αδρανείς μετά από 5 λεπτά |
+
+Μετά από διόρθωση των Secrets (*⋮ → Settings → Secrets*) η εφαρμογή ξεκινά ξανά. Αν δεν ξεκινήσει, πατήστε
+**Δοκιμή ξανά** ή *Manage app → Reboot app*.
+
+> Η διάγνωση δοκιμάστηκε σε πραγματική PostgreSQL 16, με λάθος κωδικό, SSL, εξαντλημένες συνδέσεις, DNS και
+> απόρριψη TCP. Η σύνδεση με το **πραγματικό** Supabase project δεν έχει δοκιμαστεί από το περιβάλλον ανάπτυξης,
+> γιατί δεν επιτρέπεται πρόσβαση δικτύου εκεί. Επιβεβαιώνεται στο Streamlit Cloud με την παραπάνω διάγνωση.

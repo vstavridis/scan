@@ -4,15 +4,8 @@ from __future__ import annotations
 import streamlit as st
 
 from app import backend
-from app.auth import ROLE_LABELS, Principal
+from app.auth import Principal
 from app.services.errors import ServiceError
-
-PERMISSIONS = {
-    "dashboard": {"secretary", "admin"},
-    "admin": {"admin"},
-    "scan": {"scanner", "admin"},
-    "view": {"scanner", "secretary", "admin"},
-}
 
 CSS = """
 <style>
@@ -39,65 +32,51 @@ def inject_css() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
 
 
-def principal() -> Principal | None:
-    return st.session_state.get("principal")
+def _cloud_email() -> str | None:
+    """Email του προσκεκλημένου χρήστη (Private app στο Streamlit Cloud), αν είναι διαθέσιμο."""
+    try:
+        user = st.user
+        if getattr(user, "is_logged_in", None) is False:
+            return None
+        email = user.get("email") if hasattr(user, "get") else getattr(user, "email", None)
+        return str(email) if email and "@" in str(email) else None
+    except Exception:
+        return None
 
 
-def current_role() -> str | None:
-    p = principal()
-    return p.role if p else None
+def principal() -> Principal:
+    """Ο χρήστης της συνεδρίας: email από το Streamlit Cloud + προαιρετικό όνομα (για το audit)."""
+    return backend.identity(st.session_state.get("wh_user_name"), _cloud_email())
 
 
-def has(permission: str) -> bool:
-    return current_role() in PERMISSIONS[permission]
-
-
-def require(permission: str) -> bool:
-    if has(permission):
-        return True
-    if current_role() is None:
-        st.info("Συνδεθείτε από την πλαϊνή στήλη για να δείτε αυτή τη σελίδα.")
-    else:
-        st.error("Ο ρόλος σας δεν έχει πρόσβαση σε αυτή τη σελίδα.")
-    return False
+def require(_permission: str = "") -> bool:
+    """Συμβατότητα: όλοι οι προσκεκλημένοι χρήστες έχουν πρόσβαση σε όλες τις οθόνες."""
+    return True
 
 
 def show_error(exc: ServiceError) -> None:
     st.error(exc.message)
 
 
-def logout() -> None:
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    st.session_state["wh_clear_token"] = True
-    st.session_state["wh_restore_done"] = True
-
-
-def login_sidebar() -> None:
+def user_sidebar() -> None:
+    """Ποιος χρησιμοποιεί την εφαρμογή (για το ιστορικό). Χωρίς κωδικούς."""
     with st.sidebar:
         st.markdown("### 🏭 Αποθήκη Barcode")
-        p = principal()
-        if p is not None:
-            st.success(f"**{p.name}**  \n{ROLE_LABELS.get(p.role, '')}")
-            if st.button("Αποσύνδεση", width="stretch"):
-                logout()
-                st.rerun()
-            return
-        with st.form("login"):
-            st.markdown("**Σύνδεση**")
-            role = st.selectbox("Ρόλος", ["scanner", "secretary", "admin"], format_func=lambda r: ROLE_LABELS[r])
-            name = st.text_input("Όνομα χρήστη / συσκευής", max_chars=60, placeholder="π.χ. Μαρία ή Αποθήκη PC1")
-            password = st.text_input("Κωδικός", type="password")
-            remember = st.checkbox("Να με θυμάται αυτός ο υπολογιστής", value=True)
-            ok = st.form_submit_button("Σύνδεση", width="stretch")
-        if ok:
-            try:
-                p, token = backend.login(role, password, name)
-            except ServiceError as exc:
-                st.error(exc.message)
-                return
-            st.session_state["principal"] = p
-            st.session_state["just_logged_in"] = True
-            if remember:
-                st.session_state["wh_store_token"] = token
-            st.rerun()
+        email = _cloud_email()
+        if email:
+            st.caption(f"Συνδεδεμένος μέσω Streamlit: **{email}**")
+        if "wh_user_name" not in st.session_state:
+            st.session_state["wh_user_name"] = (st.query_params.get("user") or "")[:60]
+
+        def _remember() -> None:  # το όνομα μένει στο URL (σελιδοδείκτης) μετά από ανανέωση
+            name = st.session_state.get("wh_user_name", "").strip()
+            if name:
+                st.query_params["user"] = name
+            elif "user" in st.query_params:
+                del st.query_params["user"]
+
+        st.text_input("Όνομα χρήστη / συσκευής (για το ιστορικό)", key="wh_user_name", max_chars=60,
+                      placeholder="π.χ. Μαρία ή Αποθήκη PC1", on_change=_remember)
+        name = st.session_state.get("wh_user_name", "").strip()
+        if name and st.query_params.get("user") != name:
+            st.query_params["user"] = name   # η πλοήγηση στο μενού αφαιρεί τις παραμέτρους του URL

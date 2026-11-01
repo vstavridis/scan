@@ -87,35 +87,27 @@ def test_no_active_excel_is_never_valid(app_env):
     assert scan(login("scanner"), "VS11486")[0]["result"] == "no_catalog"
 
 
-def test_role_protection_in_backend(app_env, synthetic_master):
+def test_no_internal_login_all_screens_available(app_env, synthetic_master):
+    """Χωρίς ρόλους/κωδικούς: κάθε προσκεκλημένος χρήστης έχει πρόσβαση σε όλες τις λειτουργίες.
+    Οι ενέργειες απαιτούν μόνο ταυτότητα (για το audit) και καταγράφονται με το όνομα/email."""
     activate_workbook(synthetic_master)
-    scanner, sec = login("scanner"), login("secretary")
+    user = backend.identity("Μαρία", "maria@example.com")
+    assert user.actor == "Μαρία <maria@example.com>"
+    scan(user, "VS11486")
+    assert backend.dashboard(user)["totals"]["total_kilos"] == "412"
+    assert backend.scanner_view(user)["items"][0]["barcode"] == "VS11486"
+    assert backend.history_rows(user)
+    assert backend.get_settings_values(user)["scanner_terminator"] == "enter"
+    assert backend.imports(user)
+    item = backend.dashboard(user)["items"][0]
+    backend.transfer_item(user, item["id"])
+    log = backend.audit_log(user)
+    done = next(r for r in log if r["action"] == "transfer.completed")
+    assert done["actor"] == "Μαρία <maria@example.com>"
+    # χωρίς ταυτότητα δεν εκτελείται τίποτα (π.χ. κλήση εκτός συνεδρίας)
     with pytest.raises(PermissionDenied):
         backend.submit_scans(None, [{"event_id": uuid.uuid4().hex, "barcode": "X"}])
-    with pytest.raises(PermissionDenied):
-        backend.dashboard(scanner)
-    with pytest.raises(PermissionDenied):
-        backend.transfer_item(scanner, 1)
-    with pytest.raises(PermissionDenied):
-        backend.submit_scans(sec, [{"event_id": uuid.uuid4().hex, "barcode": "X"}])
-    with pytest.raises(PermissionDenied):
-        backend.get_settings_values(sec)
-    with pytest.raises(PermissionDenied):
-        backend.stage_excel(sec, "x.xlsx", b"x")
-    with pytest.raises(ServiceError):
-        backend.login("admin", "wrong")
-    # υπογεγραμμένο token "θυμήσου τη συσκευή": αλλοιωμένο -> απορρίπτεται
-    _p, token = backend.login("scanner", "scan-pw", "PC1")
-    assert backend.restore(token).role == "scanner"
-    assert backend.restore(token[:-2] + "xx") is None
-    import base64
-    import json
-    payload, sig = token.split(".")
-    data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    data["r"] = "admin"  # πλαστογράφηση ρόλου με την παλιά υπογραφή
-    forged = base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
-    assert forged != payload
-    assert backend.restore(forged + "." + sig) is None
+    assert backend.identity(None, "x@y.gr").name == "x@y.gr" and backend.identity().name == "Χρήστης"
 
 
 def test_concurrent_sessions_same_barcode_counts_once(app_env, synthetic_master):

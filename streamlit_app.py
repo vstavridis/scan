@@ -28,6 +28,25 @@ if problems:
     st.stop()
 
 
+from app.db.diagnostics import DatabaseConnectionError  # noqa: E402
+
+
+def show_db_problem(exc: DatabaseConnectionError) -> None:
+    """Η πραγματική αιτία (χωρίς κωδικούς/connection string) αντί για γενικό PoolTimeout."""
+    d = exc.diagnosis
+    st.error(f"**Η βάση δεδομένων δεν είναι διαθέσιμη — {d.title}**  \n{d.summary}")
+    if d.target and not d.target.get("parse_error"):
+        st.caption(f"Στόχος: `{d.target.get('user')}@{d.target.get('host')}:{d.target.get('port')}/"
+                   f"{d.target.get('dbname')}` · sslmode: `{d.target.get('sslmode')}`")
+    for line in d.details:
+        st.markdown(f"- {line}")
+    for hint in d.hints:
+        st.info(hint)
+    if st.button("Δοκιμή ξανά"):
+        _startup.clear()
+        st.rerun()
+
+
 @st.cache_resource(show_spinner="Σύνδεση με τη βάση δεδομένων…")
 def _startup() -> bool:
     backend.startup()  # σχήμα βάσης + recovery, μία φορά ανά διεργασία
@@ -36,33 +55,28 @@ def _startup() -> bool:
 
 try:
     _startup()
+except DatabaseConnectionError as exc:
+    st.title("Αποθήκη Barcode")
+    show_db_problem(exc)
+    st.stop()
 except Exception as exc:  # pragma: no cover - εμφανίζεται στον χρήστη
-    st.error(f"Δεν ήταν δυνατή η σύνδεση με τη βάση δεδομένων: {type(exc).__name__}: {exc}")
+    st.error(f"Δεν ήταν δυνατή η εκκίνηση: {type(exc).__name__}")
     st.stop()
 
-from app.ui.common import has, inject_css, login_sidebar  # noqa: E402
-from app.ui.components.auth_bridge import run_bridge  # noqa: E402
+from app.ui.common import inject_css, user_sidebar  # noqa: E402
 from app.ui.views import dashboard, history, scanner, settings  # noqa: E402
 
 inject_css()
-run_bridge()
-login_sidebar()
+user_sidebar()
 
-scanner_page = st.Page(scanner.page, title="Scanner / Αποθήκη", icon="📟", url_path="scanner",
-                       default=not has("dashboard"))
-pages = []
-home = scanner_page
-if has("dashboard"):
-    home = st.Page(dashboard.page, title="Γραμματεία / Dashboard", icon="📊", url_path="dashboard", default=True)
-    pages.append(home)
-if has("scan") or not has("view"):
-    pages.append(scanner_page)  # και για μη συνδεδεμένους: η σελίδα ζητά σύνδεση
-if has("dashboard"):
-    pages.append(st.Page(history.page, title="Ιστορικό", icon="🗂️", url_path="history"))
-if has("admin"):
-    pages.append(st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"))
-
-nav = st.navigation(pages)
-if st.session_state.pop("just_logged_in", False) and nav.url_path != home.url_path:
-    st.switch_page(home)
-nav.run()
+# Πρόσβαση: Private app στο Streamlit Community Cloud (μόνο προσκεκλημένοι). Όλες οι οθόνες για όλους.
+nav = st.navigation([
+    st.Page(dashboard.page, title="Γραμματεία / Dashboard", icon="📊", url_path="dashboard", default=True),
+    st.Page(scanner.page, title="Scanner / Αποθήκη", icon="📟", url_path="scanner"),
+    st.Page(history.page, title="Ιστορικό", icon="🗂️", url_path="history"),
+    st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"),
+])
+try:
+    nav.run()
+except DatabaseConnectionError as exc:
+    show_db_problem(exc)

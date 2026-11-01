@@ -1,16 +1,17 @@
 """Backend της εφαρμογής: το μοναδικό σημείο από όπου το UI (Streamlit) αλλάζει δεδομένα.
 
-Κάθε συνάρτηση δέχεται τον συνδεδεμένο χρήστη (Principal) και ελέγχει δικαιώματα ΕΔΩ, στην
-Python, ανεξάρτητα από το ποια κουμπιά εμφανίζονται. Αντικαθιστά τα παλιά FastAPI endpoints.
+Η πρόσβαση στην εφαρμογή ελέγχεται από το Streamlit Community Cloud (Private app, μόνο
+προσκεκλημένοι χρήστες). Κάθε συνάρτηση δέχεται την ταυτότητα του χρήστη (Principal) μόνο για το
+ιστορικό ενεργειών (audit). Δεν υπάρχουν δημόσια API endpoints: όλα εκτελούνται μέσα στον Python
+server του Streamlit και τα credentials της Supabase δεν φεύγουν ποτέ από αυτόν.
 """
 from __future__ import annotations
 
 import logging
-import time
 from datetime import date
 from typing import Any
 
-from app.auth import ROLE_LABELS, Principal, authorize, check_password, issue_token, verify_token
+from app.auth import Principal, authorize, make_principal
 from app.config import get_settings
 from app.db.database import init_db
 from app.logging_setup import setup_logging
@@ -35,21 +36,10 @@ def startup() -> None:
     _started = True
 
 
-# --------------------------------------------------------------------------- σύνδεση
-def login(role: str, password: str, name: str = "") -> tuple[Principal, str]:
-    if role not in ROLE_LABELS:
-        raise ServiceError("Άγνωστος ρόλος.")
-    if not check_password(role, password):
-        time.sleep(0.7)  # επιβράδυνση δοκιμών κωδικού
-        raise ServiceError("Λάθος κωδικός ή ο ρόλος δεν έχει ρυθμιστεί.", status_code=401, code="unauthorized")
-    name = (name or "").strip()[:60] or ROLE_LABELS[role]
-    token, _exp = issue_token(role, name)
-    return Principal(role=role, name=name), token
-
-
-def restore(token: str | None) -> Principal | None:
-    """Επαναφορά σύνδεσης από υπογεγραμμένο token (π.χ. μετά από ανανέωση σελίδας)."""
-    return verify_token(token) if token else None
+# --------------------------------------------------------------------------- ταυτότητα
+def identity(name: str | None = None, email: str | None = None) -> Principal:
+    """Ο χρήστης της τρέχουσας συνεδρίας (για το audit). Χωρίς κωδικούς."""
+    return make_principal(name, email)
 
 
 def public_config() -> dict[str, Any]:
@@ -185,6 +175,17 @@ def update_settings(p: Principal | None, values: dict[str, Any]) -> dict[str, An
         raise ServiceError(str(exc)) from exc
 
 
+def diagnose_database(p: Principal | None) -> Any:
+    """Διάγνωση σύνδεσης βάσης με ανεξάρτητη σύνδεση (χωρίς μυστικά στο αποτέλεσμα)."""
+    authorize(p, "admin")
+    from app.db.diagnostics import diagnose
+    s = get_settings()
+    if not s.database_url:
+        from app.db.diagnostics import Diagnosis
+        return Diagnosis("ok", "Τοπική SQLite (μόνο για δοκιμές)")
+    return diagnose(s.database_url)
+
+
 def health() -> dict[str, Any]:
     """Διαγνωστικά για τη σελίδα Ρυθμίσεων (χωρίς μυστικά)."""
     s = get_settings()
@@ -197,7 +198,9 @@ def health() -> dict[str, Any]:
                 row = conn.execute("SELECT current_setting('server_version') AS v").fetchone()
                 out["database"] = f"PostgreSQL {row['v']} (Supabase) — σύνδεση OK"
     except Exception as exc:  # pragma: no cover
-        out["problems"].append(f"Η βάση δεν απαντά: {type(exc).__name__}: {exc}")
+        from app.db.diagnostics import DatabaseConnectionError
+        reason = exc.diagnosis.title if isinstance(exc, DatabaseConnectionError) else type(exc).__name__
+        out["problems"].append(f"Η βάση δεν απαντά: {reason}")
     from app.storage import SupabaseObjectStore, get_store
     store = get_store()
     out["storage"] = f"Supabase Storage, bucket «{store.bucket}»" if isinstance(store, SupabaseObjectStore) \

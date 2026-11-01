@@ -21,7 +21,7 @@ import httpx
 import pytest
 
 from app import backend
-from tests.conftest import (PASSWORDS, ROOT, activate_workbook, configure_env, free_port, login, pg_admin_url,
+from tests.conftest import (ROOT, activate_workbook, configure_env, free_port, login, pg_admin_url,
                             temp_pg_database)
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -90,23 +90,16 @@ def browser():
         b.close()
 
 
-def st_login(page, url: str, role: str, name: str, password: str) -> None:
-    page.goto(url)
-    page.wait_for_selector('input[aria-label="Κωδικός"]', timeout=30000)
-    labels = {"scanner": "Αποθήκη (Scanner)", "secretary": "Γραμματεία", "admin": "Διαχειριστής"}
-    if role != "scanner":
-        page.locator('[data-testid="stSelectbox"]').click()
-        page.get_by_role("option", name=labels[role]).click()
-    page.fill('input[aria-label="Όνομα χρήστη / συσκευής"]', name)
-    page.fill('input[aria-label="Κωδικός"]', password)
-    page.get_by_role("button", name="Σύνδεση").click()
-    page.wait_for_selector("text=Αποσύνδεση", timeout=30000)
+def open_page(page, url: str, path: str = "", user: str = "") -> None:
+    """Χωρίς login: η εφαρμογή ανοίγει κατευθείαν (Private app στο Streamlit Cloud)."""
+    from urllib.parse import quote
+    page.goto(f"{url}/{path}" + (f"?user={quote(user)}" if user else ""))
 
 
 def open_scanner(browser, url: str):
     ctx = browser.new_context(viewport={"width": 1400, "height": 950})
     page = ctx.new_page()
-    st_login(page, url, "scanner", "Αποθήκη PC1", PASSWORDS["scanner"])
+    open_page(page, url, "scanner", "Αποθήκη PC1")
     page.wait_for_selector(".whs-root", timeout=30000)
     wait_connected(page)
     page.mouse.click(700, 600)   # ένα κλικ στην αρχή της βάρδιας
@@ -273,7 +266,7 @@ def test_two_computers_stay_in_sync(browser, tmp_path, synthetic_master):
         sctx, scanner_page = open_scanner(browser, srv.url)
         dctx = browser.new_context(viewport={"width": 1500, "height": 1100})
         desk = dctx.new_page()
-        st_login(desk, srv.url, "secretary", "Μαρία", PASSWORDS["secretary"])
+        open_page(desk, srv.url, "", "Μαρία")
         desk.wait_for_selector("text=Γραμματεία — Ζωντανή εικόνα", timeout=30000)
         wedge(scanner_page, "VS11486")
         wedge(scanner_page, "VS11487")
@@ -319,7 +312,7 @@ def test_admin_uploads_excel_from_settings(browser, tmp_path, synthetic_master):
     with app_server(tmp_path) as srv:
         ctx = browser.new_context(viewport={"width": 1500, "height": 1100}, accept_downloads=True)
         page = ctx.new_page()
-        st_login(page, srv.url, "admin", "Admin", PASSWORDS["admin"])
+        open_page(page, srv.url, "", "Admin")
         page.get_by_role("link", name="Ρυθμίσεις").click()
         page.wait_for_selector("text=Ανέβασμα νέου Excel", timeout=30000)
         page.set_input_files("input[type=file]", str(synthetic_master))
@@ -336,4 +329,44 @@ def test_admin_uploads_excel_from_settings(browser, tmp_path, synthetic_master):
         dl.value.save_as(out)
         assert out.read_bytes() == synthetic_master.read_bytes()
         page.screenshot(path=str(tmp_path / "settings.png"), full_page=True)
+        ctx.close()
+
+
+def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthetic_master):
+    """Καμία φόρμα σύνδεσης/κωδικός· όλες οι οθόνες ανοίγουν και λειτουργούν."""
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Γραμματεία — Ζωντανή εικόνα", timeout=30000)
+        assert page.locator('input[aria-label="Κωδικός"]').count() == 0
+        assert page.locator("text=Σύνδεση").count() == 0
+        page.fill('input[aria-label="Όνομα χρήστη / συσκευής (για το ιστορικό)"]', "Μαρία")
+        page.keyboard.press("Enter")
+        for link, marker in (("Scanner / Αποθήκη", ".whs-root"), ("Ιστορικό", "text=Ιστορικό σκαναρισμάτων"),
+                             ("Ρυθμίσεις", "text=Ανέβασμα νέου Excel"),
+                             ("Γραμματεία / Dashboard", "text=Γραμματεία — Ζωντανή εικόνα")):
+            page.get_by_role("link", name=link).click()
+            page.wait_for_selector(marker, timeout=30000)
+            assert page.locator('[data-testid="stException"]').count() == 0, link
+        assert "user=" in page.url  # το όνομα μένει στο URL (σελιδοδείκτης)
+        # σκανάρισμα + μεταφορά χωρίς login, με επιβεβαίωση και καταγραφή του χρήστη
+        page.get_by_role("link", name="Scanner / Αποθήκη").click()
+        page.wait_for_selector(".whs-root")
+        wait_connected(page)
+        page.mouse.click(700, 600)
+        wedge(page, "VS11486")
+        page.wait_for_selector(".whs-fb-ok", timeout=15000)
+        page.get_by_role("link", name="Γραμματεία / Dashboard").click()
+        page.get_by_role("tab", name="Αναλυτική λίστα").click()
+        page.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
+        page.wait_for_selector("text=Επιβεβαίωση μεταφοράς", timeout=15000)   # απαιτείται επιβεβαίωση
+        page.get_by_role("button", name="✔ Ναι, μεταφορά στα Σβησμένα").click()
+        page.wait_for_selector("text=μεταφέρθηκε στα Σβησμένα", timeout=60000)
+        log = backend.audit_log(login("admin"))
+        assert next(r for r in log if r["action"] == "transfer.completed")["actor"] == "Μαρία"
+        assert not errors, errors
         ctx.close()

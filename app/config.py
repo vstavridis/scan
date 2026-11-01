@@ -4,7 +4,8 @@
 
     [database]   url            -> Supabase PostgreSQL (connection string, pooler)
     [supabase]   url, service_key, bucket  -> Supabase Storage (private bucket)
-    [auth]       secret_key, admin_password, secretary_password, scanner_password
+
+Πρόσβαση χρηστών: Private app στο Streamlit Cloud (μόνο προσκεκλημένοι) — χωρίς εσωτερικό login.
 
 Τοπική ανάπτυξη / tests: environment variables (APP_*). Με `APP_DEV_SQLITE` και
 `APP_DEV_STORAGE_DIR` η εφαρμογή χρησιμοποιεί τοπικό SQLite και φάκελο αντί για Supabase.
@@ -13,7 +14,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,13 +61,8 @@ class Settings:
     # αποθήκευση αρχείων
     supabase_url: str | None = None
     supabase_service_key: str | None = None
-    supabase_bucket: str = "warehouse-excel"
+    supabase_bucket: str | None = None
     dev_storage_dir: Path | None = None
-    # ασφάλεια
-    secret_key: str = ""
-    passwords: dict[str, str] = field(default_factory=dict)
-    scanner_token_hours: int = 24 * 30
-    user_token_hours: int = 12
     # λοιπά
     timezone: str = "Europe/Athens"
     source_sheet: str = DEFAULT_SOURCE_SHEET
@@ -85,11 +81,8 @@ class Settings:
             out.append("Λείπει το `[database] url` (Supabase PostgreSQL connection string) από τα Secrets.")
         if not (self.supabase_url and self.supabase_service_key) and not self.dev_storage_dir:
             out.append("Λείπουν τα `[supabase] url` και `service_key` από τα Secrets (Supabase Storage).")
-        if not self.secret_key or len(self.secret_key) < 16:
-            out.append("Λείπει το `[auth] secret_key` (τυχαίο κείμενο τουλάχιστον 32 χαρακτήρων).")
-        missing = [r for r in ("admin", "secretary", "scanner") if r not in self.passwords]
-        if missing:
-            out.append("Λείπουν κωδικοί ρόλων στο `[auth]`: " + ", ".join(f"{r}_password" for r in missing))
+        if not self.dev_storage_dir and not self.supabase_bucket:
+            out.append("Λείπει το `[supabase] bucket` από τα Secrets.")
         return out
 
 
@@ -97,22 +90,13 @@ def load_settings() -> Settings:
     sec = _secrets()
     sqlite = _get(sec, "dev", "sqlite_path", "APP_DEV_SQLITE")
     storage_dir = _get(sec, "dev", "storage_dir", "APP_DEV_STORAGE_DIR")
-    passwords = {
-        role: str(pw)
-        for role in ("admin", "secretary", "scanner")
-        if (pw := _get(sec, "auth", f"{role}_password", f"APP_{role.upper()}_PASSWORD"))
-    }
     return Settings(
         database_url=_get(sec, "database", "url", "APP_DATABASE_URL"),
         dev_sqlite_path=Path(sqlite) if sqlite else None,
         supabase_url=(_get(sec, "supabase", "url", "APP_SUPABASE_URL") or None),
         supabase_service_key=_get(sec, "supabase", "service_key", "APP_SUPABASE_SERVICE_KEY"),
-        supabase_bucket=_get(sec, "supabase", "bucket", "APP_SUPABASE_BUCKET", "warehouse-excel"),
+        supabase_bucket=_get(sec, "supabase", "bucket", "APP_SUPABASE_BUCKET"),
         dev_storage_dir=Path(storage_dir) if storage_dir else None,
-        secret_key=str(_get(sec, "auth", "secret_key", "APP_SECRET_KEY", "")),
-        passwords=passwords,
-        scanner_token_hours=int(_get(sec, "auth", "scanner_token_hours", "APP_SCANNER_TOKEN_HOURS", 24 * 30)),
-        user_token_hours=int(_get(sec, "auth", "user_token_hours", "APP_USER_TOKEN_HOURS", 12)),
         timezone=_get(sec, "app", "timezone", "APP_TIMEZONE", "Europe/Athens"),
         source_sheet=_get(sec, "app", "source_sheet", "APP_SOURCE_SHEET", DEFAULT_SOURCE_SHEET),
         target_sheet=_get(sec, "app", "target_sheet", "APP_TARGET_SHEET", DEFAULT_TARGET_SHEET),

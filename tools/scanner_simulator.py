@@ -10,7 +10,7 @@
    συνδέεται ως Scanner και «πληκτρολογεί» barcode + Enter όπως ένας keyboard-wedge scanner.
 
 Παραδείγματα:
-    python tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app --password <SCANNER_PW> --count 100
+    python tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app --headed --count 100
     python tools/scanner_simulator.py --mode backend --count 300 --batch 10      # με τα Secrets/env της βάσης
 
 ΠΡΟΣΟΧΗ: καταχωρεί πραγματικά σκαναρίσματα. Χρησιμοποιήστε δοκιμαστικό project/βάση.
@@ -44,9 +44,7 @@ def pick(known: list[str], count: int, dup: float, unknown: float) -> list[str]:
 def run_backend(args: argparse.Namespace) -> int:
     from app import backend
     backend.startup()
-    scanner, _ = backend.login(args.role, args.password, "simulator")
-    lookup, _ = backend.login("admin" if args.role == "admin" else "secretary",
-                              args.lookup_password or args.password, "simulator")
+    scanner = lookup = backend.identity("simulator")
     known = [p["barcode"] for p in backend.search_products(lookup, "", limit=5000)]
     codes = pick(known, args.count, args.duplicates, args.unknown)
     events = [{"event_id": uuid.uuid4().hex, "barcode": c, "seq": i} for i, c in enumerate(codes)]
@@ -80,22 +78,16 @@ def run_backend(args: argparse.Namespace) -> int:
 def run_browser(args: argparse.Namespace) -> int:
     from playwright.sync_api import sync_playwright
 
-    labels = {"scanner": "Αποθήκη (Scanner)", "admin": "Διαχειριστής"}
     with sync_playwright() as p:
         try:
             browser = p.chromium.launch(headless=not args.headed)
         except Exception:
             browser = p.chromium.launch(headless=not args.headed, executable_path=args.chromium, args=["--no-sandbox"])
-        page = browser.new_page(viewport={"width": 1400, "height": 950})
-        page.goto(args.url)
-        page.wait_for_selector('input[aria-label="Κωδικός"]', timeout=60000)
-        if args.role != "scanner":
-            page.locator('[data-testid="stSelectbox"]').click()
-            page.get_by_role("option", name=labels[args.role]).click()
-        page.fill('input[aria-label="Όνομα χρήστη / συσκευής"]', "Simulator")
-        page.fill('input[aria-label="Κωδικός"]', args.password)
-        page.get_by_role("button", name="Σύνδεση").click()
-        page.wait_for_selector(".whs-root", timeout=60000)
+        ctx = browser.new_context(viewport={"width": 1400, "height": 950},
+                                  storage_state=args.storage_state if args.storage_state else None)
+        page = ctx.new_page()
+        page.goto(args.url.rstrip("/") + "/scanner?user=Simulator")
+        page.wait_for_selector(".whs-root", timeout=120000)
         page.mouse.click(700, 600)
         codes = [l.strip() for l in open(args.barcodes_file, encoding="utf-8") if l.strip()] if args.barcodes_file \
             else [f"{args.prefix}{i:04d}" for i in range(1, args.count + 1)]
@@ -119,9 +111,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["backend", "browser"], default="browser")
     ap.add_argument("--url", default="http://localhost:8501")
-    ap.add_argument("--role", default="scanner", choices=["scanner", "admin"])
-    ap.add_argument("--password", required=True)
-    ap.add_argument("--lookup-password", default=None, help="κωδικός Γραμματείας για ανάγνωση καταλόγου (backend mode)")
+    ap.add_argument("--storage-state", default=None,
+                    help="browser mode, Private app: αρχείο Playwright storage state με σύνδεση στο Streamlit Cloud")
     ap.add_argument("--count", type=int, default=100)
     ap.add_argument("--rate", type=float, default=0, help="σαρώσεις/δευτερόλεπτο (0 = όσο πιο γρήγορα)")
     ap.add_argument("--batch", type=int, default=5, help="events ανά batch (backend mode)")
