@@ -124,7 +124,16 @@ class SupabaseObjectStore(ObjectStore):
     def __init__(self, url: str, service_key: str, bucket: str, transport: httpx.BaseTransport | None = None):
         self.base = url.rstrip("/") + "/storage/v1"
         self.bucket = bucket
-        self.headers = {"Authorization": f"Bearer {service_key}", "apikey": service_key}
+        key = service_key.strip()
+        if key.startswith("sb_"):
+            # Νέου τύπου κλειδιά (sb_secret_...): ΔΕΝ είναι JWT. Στέλνονται μόνο στο header `apikey`
+            # και το API gateway του Supabase τα αντιστοιχίζει στον ρόλο service_role.
+            self.headers = {"apikey": key}
+        else:
+            # Παλαιού τύπου service_role JWT: apikey + Authorization Bearer.
+            self.headers = {"Authorization": f"Bearer {key}", "apikey": key}
+        if key.startswith("sb_publishable_"):
+            raise ConfigError("Δόθηκε publishable key. Απαιτείται το Secret key (sb_secret_...) ή το service_role key.")
         self._transport = transport
 
     def _client(self) -> httpx.Client:

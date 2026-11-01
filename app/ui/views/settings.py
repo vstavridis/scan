@@ -181,7 +181,7 @@ def page() -> None:
         return
     for problem in health["problems"]:
         st.error(problem)
-    st.caption(f"Βάση δεδομένων: {health['database']}")
+    st.caption(f"Βάση δεδομένων: {health['database']} · Αρχεία: {health.get('storage', '')}")
     _active_import_box(imports)
     st.divider()
     _upload_section()

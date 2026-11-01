@@ -190,8 +190,18 @@ def health() -> dict[str, Any]:
     s = get_settings()
     out: dict[str, Any] = {"database": "postgres" if s.uses_postgres else "sqlite (μόνο τοπικά)",
                            "problems": s.problems()}
+    try:
+        from app.db.database import connect
+        with connect() as conn:
+            if conn.kind == "pg":
+                row = conn.execute("SELECT current_setting('server_version') AS v").fetchone()
+                out["database"] = f"PostgreSQL {row['v']} (Supabase) — σύνδεση OK"
+    except Exception as exc:  # pragma: no cover
+        out["problems"].append(f"Η βάση δεν απαντά: {type(exc).__name__}: {exc}")
     from app.storage import SupabaseObjectStore, get_store
     store = get_store()
+    out["storage"] = f"Supabase Storage, bucket «{store.bucket}»" if isinstance(store, SupabaseObjectStore) \
+        else "τοπικός φάκελος (μόνο για δοκιμές)"
     if isinstance(store, SupabaseObjectStore):
         problem = store.check_bucket()
         if problem:

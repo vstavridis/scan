@@ -34,6 +34,15 @@ _pool = None
 _pool_url: str | None = None
 
 
+# Μόνο για δοκιμές: προσομοίωση καθυστέρησης δικτύου (ms) σε ΚΑΘΕ εντολή SQL.
+_SIM_LATENCY = float(os.environ.get("APP_SIMULATE_DB_LATENCY_MS", "0") or 0) / 1000.0
+
+
+def _rt(n: int = 1) -> None:
+    if _SIM_LATENCY:
+        time.sleep(_SIM_LATENCY * n)
+
+
 class IntegrityError(Exception):
     """Παραβίαση constraint (unique κ.λπ.), ανεξάρτητα από τη βάση."""
 
@@ -46,6 +55,8 @@ class Conn:
         self.kind = kind
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        if _SIM_LATENCY:  # μόνο για δοκιμές: round-trip δικτύου ανά εντολή (π.χ. προς Supabase)
+            time.sleep(_SIM_LATENCY)
         try:
             if self.kind == "pg":
                 return self.raw.execute(sql.replace("%", "%%").replace("?", "%s"), tuple(params))
@@ -61,6 +72,8 @@ class Conn:
             raise
 
     def executemany(self, sql: str, rows: list[Sequence[Any]]) -> None:
+        if _SIM_LATENCY:
+            time.sleep(_SIM_LATENCY)
         try:
             if self.kind == "pg":
                 with self.raw.cursor() as cur:
@@ -116,14 +129,10 @@ def close_pool() -> None:
     _pool_url = None
 
 
-_SIM_LATENCY = float(os.environ.get("APP_SIMULATE_DB_LATENCY_MS", "0") or 0) / 1000.0
-
-
 @contextmanager
 def _raw() -> Iterator[Conn]:
     s = get_settings()
-    if _SIM_LATENCY:  # μόνο για δοκιμές: προσομοίωση καθυστέρησης δικτύου προς τη βάση (π.χ. Supabase)
-        time.sleep(_SIM_LATENCY)
+    _rt()  # έλεγχος σύνδεσης του pool
     if s.database_url:
         with _pg_pool(s.database_url).connection() as c:
             yield Conn(c, "pg")
@@ -180,6 +189,7 @@ def snapshot() -> Iterator[Conn]:
     """Συνεπές στιγμιότυπο μόνο-ανάγνωσης (όλα τα queries βλέπουν την ίδια κατάσταση)."""
     init_db()
     with _raw() as conn:
+        _rt(2)  # BEGIN + ROLLBACK
         if conn.kind == "pg":
             conn.raw.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         else:
@@ -199,6 +209,7 @@ def transaction(lock: str | None = None) -> Iterator[Conn]:
     init_db()
     if get_settings().database_url:
         with _raw() as conn:
+            _rt(2)  # BEGIN + COMMIT
             with conn.raw.transaction():
                 if lock:
                     conn.lock(lock)
@@ -206,6 +217,7 @@ def transaction(lock: str | None = None) -> Iterator[Conn]:
         return
     with _sqlite_write_lock:
         with _raw() as conn:
+            _rt(2)
             conn.raw.execute("BEGIN IMMEDIATE")
             try:
                 yield conn

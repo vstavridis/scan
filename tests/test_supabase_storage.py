@@ -16,10 +16,12 @@ from app.storage import StorageError, SupabaseObjectStore, set_store
 from tests.conftest import activate_workbook, login, scan, working_file
 
 KEY = "service-role-test-key"
+NEW_KEY = "sb_secret_TESTONLY0123456789"
 
 
 class FakeSupabase:
-    def __init__(self, public: bool = False):
+    def __init__(self, public: bool = False, key: str = KEY):
+        self.key = key
         self.objects: dict[str, bytes] = {}
         self.public = public
         self.requests: list[httpx.Request] = []
@@ -27,7 +29,11 @@ class FakeSupabase:
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
-        assert req.headers["authorization"] == f"Bearer {KEY}" and req.headers["apikey"] == KEY
+        assert req.headers["apikey"] == self.key
+        if self.key.startswith("sb_"):
+            assert "authorization" not in req.headers   # τα νέα κλειδιά δεν είναι JWT
+        else:
+            assert req.headers["authorization"] == f"Bearer {self.key}"
         path = unquote(req.url.path)
         pre = "/storage/v1/object/"
         if req.method == "GET" and path == "/storage/v1/bucket/wh":
@@ -128,3 +134,17 @@ def test_full_flow_through_supabase_client(app_env, synthetic_master, fake, tmp_
     assert any(k.startswith("imports/00001/working/v00002_op") for k in keys)
     assert not any(k.startswith("staging/") for k in keys)   # το staging καθαρίστηκε
     assert working_file(tmp_path).read_bytes() == f.objects[[k for k in keys if "v00002" in k][0]]
+
+
+def test_new_style_secret_key_uses_apikey_header_only():
+    f = FakeSupabase(key=NEW_KEY)
+    store = SupabaseObjectStore("https://proj.supabase.co", NEW_KEY, "wh", transport=httpx.MockTransport(f.handler))
+    store.put_verified("imports/00001/original.xlsx", b"data")
+    assert store.get("imports/00001/original.xlsx") == b"data"
+    assert store.check_bucket() is None
+
+
+def test_publishable_key_is_rejected():
+    from app.config import ConfigError
+    with pytest.raises(ConfigError):
+        SupabaseObjectStore("https://proj.supabase.co", "sb_publishable_abc", "wh")

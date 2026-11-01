@@ -66,48 +66,56 @@ Web εφαρμογή που ανοίγει **μόνο από browser**. Δεν �
 
 ---
 
-## 2. Ρύθμιση Supabase (μία φορά, ~10 λεπτά)
+## 2. Ρύθμιση Supabase (project `warehouse-scanner`)
 
-1. **Δημιουργία project**: https://supabase.com → *New project*.
-   * **Region**: κοντά στο Streamlit Cloud, που τρέχει στις ΗΠΑ. Προτείνεται **East US (N. Virginia)**, για λιγότερη καθυστέρηση ανά σάρωση.
-   * Ορίστε **Database password** και κρατήστε τον.
-2. **Private bucket** για τα Excel: *Storage → New bucket* → όνομα `warehouse-excel` → **Public bucket: OFF** → File size limit 50 MB.
-   (Εναλλακτικά εκτελέστε το `supabase/storage_bucket.sql` στο *SQL Editor*.) Δεν χρειάζονται policies.
-3. **Connection string της βάσης**: πατήστε **Connect** (πάνω στη σελίδα του project) → **Session pooler**. Είναι συμβατό με το IPv4 δίκτυο του Streamlit Cloud. Αντιγράψτε το URI:
-   `postgresql://postgres.<project-ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres`
-   * Αντικαταστήστε `<PASSWORD>` με τον κωδικό της βάσης. Αν περιέχει ειδικούς χαρακτήρες (`@ : / ? #`), γράψτε τους URL-encoded (π.χ. `@` → `%40`).
-   * Προσθέστε στο τέλος `?sslmode=require`.
-   * **Μη** χρησιμοποιήσετε το "Direct connection", που είναι μόνο IPv6.
-4. **Project URL και service key**: *Project Settings → API keys / Data API*:
-   * **Project URL**: `https://<project-ref>.supabase.co`
-   * **service_role** key (ή το νέο **secret** key `sb_secret_…`). ⚠ Μυστικό: μπαίνει **μόνο** στα Streamlit Secrets.
-5. **Πίνακες**: δημιουργούνται **αυτόματα** στην πρώτη εκκίνηση της εφαρμογής, από το `app/db/schema_postgres.sql`.
-   * Το ίδιο script ενεργοποιεί Row Level Security και αφαιρεί κάθε δικαίωμα από τους ρόλους `anon`/`authenticated`, ώστε οι πίνακες να μην είναι προσβάσιμοι από το δημόσιο REST API του Supabase.
-   * Αν προτιμάτε, εκτελέστε το χειροκίνητα στο *SQL Editor*.
+Project URL: `https://uwzqfxvyjjprrqaxuztx.supabase.co` · Bucket: `warehouse-excel` (Private) — ήδη δημιουργημένα.
 
-> Free plan Supabase: ένα project παγώνει μετά από ~1 εβδομάδα **χωρίς καμία χρήση**. Σε κανονική εργασία δεν συμβαίνει. Μετά από μεγάλες αργίες μπορεί να χρειαστεί *Restore project* στο dashboard του Supabase. Για αυτόματα ημερήσια backups της βάσης απαιτείται Pro plan. Τα αρχεία Excel έχουν ήδη όλες τις εκδόσεις στο Storage.
+1. **Πίνακες (migration)**: Dashboard → **SQL Editor** → *New query* → επικολλήστε ολόκληρο το
+   [`supabase/migrations/001_warehouse_init.sql`](supabase/migrations/001_warehouse_init.sql) → **Run**.
+   Δημιουργεί όλους τους πίνακες/indexes/constraints, ενεργοποιεί Row Level Security, αφαιρεί κάθε δικαίωμα από τους
+   ρόλους `anon`/`authenticated` και επιβεβαιώνει ότι το bucket είναι **private**. Είναι idempotent (ασφαλές να ξανατρέξει).
+   *Προαιρετικό*: η εφαρμογή εκτελεί το ίδιο σχήμα και μόνη της στην πρώτη εκκίνηση.
+2. **Connection string βάσης**: κουμπί **Connect** (πάνω στο Dashboard) → **Session pooler** → αντιγράψτε το URI:
+   `postgresql://postgres.uwzqfxvyjjprrqaxuztx:[YOUR-PASSWORD]@aws-…-<region>.pooler.supabase.com:5432/postgres`
+   * βάλτε τον **Database password** στη θέση του `[YOUR-PASSWORD]` (ειδικοί χαρακτήρες URL-encoded: `@`→`%40`, `#`→`%23`, `/`→`%2F`)·
+     αν τον ξεχάσατε: *Project Settings → Database → Reset database password*·
+   * προσθέστε στο τέλος `?sslmode=require`·
+   * **όχι** "Direct connection" (μόνο IPv6 — το Streamlit Cloud είναι IPv4).
+3. **Secret key**: *Project Settings → API Keys → Secret keys* (`sb_secret_…`). Μπαίνει **μόνο** στα Streamlit Secrets
+   (`[supabase] service_key`). Υποστηρίζεται και το παλαιό `service_role` key. **Ποτέ** το publishable/anon key (απορρίπτεται).
+4. Τίποτα άλλο: δεν χρειάζονται storage policies, Edge Functions ή Auth users — όλη η πρόσβαση γίνεται server-side
+   από την εφαρμογή Streamlit.
 
-## 3. Deployment στο Streamlit Community Cloud
+> Free plan Supabase: project χωρίς **καμία** χρήση για ~1 εβδομάδα παγώνει (σε καθημερινή χρήση δεν συμβαίνει· μετά
+> από μεγάλες αργίες: *Restore project*). Αυτόματα backups βάσης μόνο σε Pro plan — τα Excel έχουν ήδη όλες τις εκδόσεις
+> στο Storage και το ιστορικό εξάγεται σε CSV/Excel.
 
-1. Ο κώδικας είναι στο GitHub `vstavridis/scan`, στο branch `claude/focused-darwin-fivuu3`. Κάντε merge στο `main` (συνιστάται) ή διαλέξτε απευθείας αυτό το branch στο επόμενο βήμα.
-2. https://share.streamlit.io → **Create app** → *Deploy a public app from GitHub*:
-   * **Repository**: `vstavridis/scan`
-   * **Branch**: `main` (ή το παραπάνω branch)
-   * **Main file path**: `streamlit_app.py`
+## 3. Deployment στο Streamlit Community Cloud (χωρίς τίποτα στα Windows)
+
+1. Ο κώδικας βρίσκεται στο `vstavridis/scan`, branch `claude/focused-darwin-fivuu3` (κάντε merge στο `main` ή
+   επιλέξτε απευθείας αυτό το branch).
+2. https://share.streamlit.io → σύνδεση με GitHub → **Create app** → *Deploy a public app from GitHub*:
+   * **Repository**: `vstavridis/scan` · **Branch**: `main` (ή το παραπάνω) · **Main file path**: `streamlit_app.py`
    * **App URL**: π.χ. `apothiki-barcode` → `https://apothiki-barcode.streamlit.app`
-3. **Advanced settings**:
-   * **Python version**: 3.12 (δοκιμασμένο και σε 3.13)
-   * **Secrets**: επικολλήστε το περιεχόμενο του `.streamlit/secrets.toml.example` με τις πραγματικές τιμές: connection string, Supabase URL, service key, bucket, `secret_key` και τρεις κωδικούς ρόλων.
-4. **Deploy**. Η πρώτη εκκίνηση εγκαθιστά τα `requirements.txt` (~2–3 λεπτά) και δημιουργεί τους πίνακες.
-5. Αν κάτι λείπει από τα Secrets, η εφαρμογή εμφανίζει σελίδα «απαιτείται ρύθμιση» με το τι ακριβώς λείπει. Τα logs: *Manage app → Logs*.
+3. **Advanced settings** → **Python version: 3.12** → **Secrets**: επικολλήστε το
+   [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) συμπληρωμένο:
+   `[database] url` (βήμα 2.2), `[supabase] service_key` (βήμα 2.3), `[auth] secret_key` (τυχαίο ≥32 χαρακτήρες) και
+   οι τρεις κωδικοί ρόλων. Το `url` και το `bucket` του Supabase είναι ήδη συμπληρωμένα.
+4. **Deploy** (πρώτη εγκατάσταση ~2–3 λεπτά). Αν λείπει κάτι, εμφανίζεται σελίδα «απαιτείται ρύθμιση» με ακριβή
+   λίστα. Logs: *Manage app → Logs*. Αλλαγή Secrets αργότερα: *⋮ → Settings → Secrets* (η εφαρμογή ξεκινά ξανά).
+5. **Έλεγχος σύνδεσης**: συνδεθείτε ως Διαχειριστής → **Ρυθμίσεις**: πάνω-πάνω γράφει
+   «PostgreSQL … (Supabase) — σύνδεση OK · Supabase Storage, bucket «warehouse-excel»». Αν υπάρχει πρόβλημα
+   (λάθος κωδικός, bucket δημόσιο, λάθος key) εμφανίζεται με κόκκινο.
 
-**Ορατότητα**: με *Sharing → Public*, οποιοσδήποτε έχει το link βλέπει τη σελίδα σύνδεσης, και οι κωδικοί ρόλων προστατεύουν τα δεδομένα. Για επιπλέον προστασία ορίστε την εφαρμογή **Private** και προσκαλέστε τα email των χρηστών. Σε αυτή την περίπτωση κάθε χρήστης συνδέεται πρώτα με λογαριασμό Google/GitHub.
+**Ορατότητα**: *Public* = όποιος έχει το link βλέπει τη σελίδα σύνδεσης (τα δεδομένα τα προστατεύουν οι κωδικοί ρόλων).
+Για επιπλέον προστασία: *Private* + πρόσκληση των email των χρηστών (θα συνδέονται πρώτα με Google/GitHub).
 
 ### Πρώτη χρήση
 
-1. **Admin**: ανοίξτε το URL → Ρόλος «Διαχειριστής» → **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
-2. **Αποθήκη** (PC με τον δέκτη): ανοίξτε το ίδιο URL → Ρόλος «Αποθήκη (Scanner)» → τσεκαρισμένο «Να με θυμάται» → **Πλήρης Οθόνη** (ή F9) → **Δοκιμή ήχου** → σκανάρετε.
-3. **Γραμματεία**: ίδιο URL → Ρόλος «Γραμματεία» → Dashboard.
+1. **Admin**: URL → Ρόλος «Διαχειριστής» → **Ρυθμίσεις** → ανέβασμα `Σχισμενα (1).xlsx` → **Έλεγχος αρχείου** → **Ενεργοποίηση αρχείου**.
+2. **Αποθήκη** (PC με τον δέκτη): ίδιο URL → «Αποθήκη (Scanner)» → τσεκαρισμένο «Να με θυμάται» → **Πλήρης Οθόνη** (ή F9)
+   → **Δοκιμή ήχου** → σκανάρετε.
+3. **Γραμματεία**: ίδιο URL → «Γραμματεία» → Dashboard.
 
 | Ποιος | Διεύθυνση | Ρόλος |
 |---|---|---|
@@ -143,7 +151,7 @@ streamlit_app.py              entrypoint (Streamlit Cloud)
 requirements.txt              εξαρτήσεις (δοκιμασμένες εκδόσεις)
 .streamlit/config.toml        ρυθμίσεις Streamlit
 .streamlit/secrets.toml.example  πρότυπο Secrets (χωρίς πραγματικούς κωδικούς)
-supabase/storage_bucket.sql   δημιουργία private bucket
+supabase/migrations/001_warehouse_init.sql  πλήρες SQL migration (πίνακες, RLS, private bucket)
 app/backend.py                ενέργειες UI + έλεγχος δικαιωμάτων
 app/auth.py                   ρόλοι, υπογεγραμμένα tokens
 app/config.py                 ρυθμίσεις από Secrets/env
@@ -166,10 +174,48 @@ tools/scanner_simulator.py    simulator υψηλής ταχύτητας
 * **Φυσικός scanner**: πρέπει να ελεγχθούν ο τερματικός χαρακτήρας (Enter/Tab), τυχόν prefix/suffix και η ελληνική διάταξη πληκτρολογίου.
 * **Supabase free plan**: όρια μεγέθους (500 MB βάση, 1 GB storage, 50 MB/αρχείο), παύση μετά από ~1 εβδομάδα αδράνειας, χωρίς αυτόματα backups βάσης.
 
-### Μετρήσεις (τοπικά, Chromium + Streamlit + PostgreSQL 16)
+### Ταχύτητα: τι μετρήθηκε και πού είναι τα όρια
 
-| Σενάριο | Αποτέλεσμα |
-|---|---|
-| 150 barcode, ~2 ms/χαρακτήρα | όλα επιβεβαιωμένα σε ~8,4 s ≈ **18 barcode/s**, 0 επαναποστολές, 0 διπλές εγγραφές |
-| Ίδιο, με +60 ms καθυστέρηση σε κάθε σύνδεση βάσης | ≈ **19 barcode/s** (το batching απορροφά την καθυστέρηση) |
-| Εμφάνιση νέου scan στη γραμματεία | ~1–2 s |
+Μέτρηση: Chromium + `streamlit run streamlit_app.py` + PostgreSQL 16, 150 barcode «πληκτρολογημένα» όπως από scanner
+(~2 ms/χαρακτήρα ≈ 18 barcode/s), με **τεχνητή καθυστέρηση σε κάθε εντολή SQL / BEGIN / COMMIT** για να
+προσομοιωθεί απομακρυσμένη βάση (`APP_SIMULATE_DB_LATENCY_MS`):
+
+Δύο ανεξάρτητες εκτελέσεις (εύρος τιμών):
+
+| Καθυστέρηση ανά εντολή SQL | Όλα επιβεβαιωμένα σε | Ρυθμός | Χαμένα / διπλά |
+|---|---|---|---|
+| 0 ms | 7,9–8,3 s | **18,2–18,9 /s** | 0 / 0 |
+| 10 ms | 8,0–8,2 s | **18,2–18,7 /s** | 0 / 0 |
+| 30 ms (ρεαλιστικό, ίδια περιοχή) | 8,7 s | **17,2 /s** | 0 / 0 |
+| 80 ms | 10,6–10,9 s | **13,7–14,2 /s** | 0 / 0 |
+| 150 ms (πολύ απαισιόδοξο) | 11,8–16,5 s | **9,1–12,8 /s** — στο όριο | 0 / 0 |
+
+Συμπέρασμα: με βάση στην ίδια περιοχή με το Streamlit Cloud (≤ 30–80 ms) ο στόχος των 10/s καλύπτεται με περιθώριο·
+με πολύ αργή διαδρομή (≈150 ms ανά εντολή) ο ρυθμός επιβεβαίωσης πέφτει γύρω στο 10/s — η **καταγραφή** όμως δεν
+επηρεάζεται (βλ. παρακάτω).
+
+Γιατί αντέχει: ένα Streamlit rerun ανά barcode θα ήταν αργό (~0,1–0,5 s/rerun στο Cloud). Εδώ όμως **κάθε rerun
+μεταφέρει ένα batch** (έως 100 barcode) και η βάση γράφει κάθε batch με ~10 εντολές, όσα barcode κι αν περιέχει.
+Όσο πιο αργή η διαδρομή, τόσο μεγαλύτερα γίνονται αυτόματα τα batches.
+
+**Περιορισμοί που δεν μπορούν να μετρηθούν εδώ** (απαιτούν το πραγματικό deployment): η καθυστέρηση browser ↔
+Streamlit Cloud (websocket, Ελλάδα ↔ ΗΠΑ ~120–180 ms) και το φορτίο του κοινόχρηστου Community Cloud. Αυτά επηρεάζουν
+**πότε έρχεται η επιβεβαίωση**, όχι **αν καταγράφεται** ένα barcode:
+
+* η λήψη των πλήκτρων και η αποθήκευση στο IndexedDB γίνονται **τοπικά στον browser**, ανεξάρτητα από τον server —
+  ο scanner δεν «περιμένει» ποτέ τον server·
+* αν ο server καθυστερεί, τα barcode εμφανίζονται πορτοκαλί («ΕΚΚΡΕΜΕΙ») και επιβεβαιώνονται λίγο αργότερα·
+  δεν χάνονται και δεν διπλασιάζονται (UNIQUE event_id).
+
+**Πώς να το επιβεβαιώσετε μετά το deploy** (από οποιονδήποτε υπολογιστή με Python — όχι από τα PC της αποθήκης):
+`python tools/scanner_simulator.py --mode browser --url https://<app>.streamlit.app --password <SCANNER_PW> --count 150`
+(χρησιμοποιεί δοκιμαστικά barcode `SIM0001…`, που θα εμφανιστούν ως «άγνωστα» — αφαιρέστε τα μετά από τη Γραμματεία).
+Ή απλώς σκανάρετε γρήγορα 30–50 ετικέτες και κοιτάξτε τον μετρητή «εκκρεμή»: πρέπει να μηδενίζει μέσα σε λίγα δευτερόλεπτα.
+
+**Αν στην πράξη δεν φτάνει** (π.χ. το Community Cloud είναι υπερφορτωμένο), οι ασφαλείς επιλογές, κατά σειρά:
+1. Τίποτα δεν χάνεται στο μεταξύ — η ουρά απλώς αδειάζει πιο αργά.
+2. Supabase project σε περιοχή κοντά στο Streamlit Cloud (US East) για ελάχιστο round-trip βάσης.
+3. Μεγαλύτερα batches (`MAX_BATCH` στο `scanner.js`).
+4. Αφιερωμένοι πόροι (Streamlit in Snowflake ή οποιοσδήποτε container host για το ίδιο `streamlit_app.py`).
+5. Μόνο ως έσχατη λύση: απευθείας αποστολή από τον browser σε Supabase Edge Function — απαιτεί δημόσιο κλειδί στον
+   browser και ξεχωριστό backend, γι' αυτό **δεν** υλοποιήθηκε.
