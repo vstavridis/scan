@@ -396,7 +396,8 @@ def sync_pending_under_lease() -> bool:
     if not b:
         return False
     current_version = int(imp["working_version"])
-    if int(b["synced_version"]) == current_version:
+    previously_synced = int(b["synced_version"])
+    if previously_synced == current_version:
         return True
     if int(b["synced_version"]) > current_version:
         raise Conflict("Ασυμφωνία εκδόσεων OneDrive. Απαιτείται έλεγχος.")
@@ -436,8 +437,9 @@ def sync_pending_under_lease() -> bool:
         row = db.execute("SELECT value FROM app_settings WHERE key=?", (BOUND_KEY,)).fetchone()
         old = json.loads(row["value"]) if row else None
         if (not old or int(old["import_id"]) != int(imp["id"])
-                or int(old["synced_version"]) != int(b["synced_version"]) and
-                   int(old["synced_version"]) != int(imp["working_version"]) - 1):
+                or int(old["synced_version"]) != previously_synced
+                or old["drive_id"] != b["drive_id"]
+                or old["item_id"] != b["item_id"]):
             raise Conflict("Η κατάσταση συγχρονισμού άλλαξε. Ελέγξτε την έκδοση του OneDrive.")
         db.execute("UPDATE app_settings SET value=? WHERE key=?",
                    (json.dumps(b, ensure_ascii=False), BOUND_KEY))
