@@ -330,14 +330,38 @@ def _upload(drive: str, item: str, expected_etag: str, data: bytes, token: str) 
     resp = _graph(token, "POST", f"/drives/{drive}/items/{item}/createUploadSession",
                   headers={"If-Match": expected_etag},
                   json={"item": {"@microsoft.graph.conflictBehavior": "replace"}}).json()
-    upload_url = resp.get("uploadUrl", "")
+    upload_url = resp.get("uploadUrl")
+    if not isinstance(upload_url, str) or not upload_url:
+        # A successful Graph response is not guaranteed to contain a session URL.
+        # No preauthorized URL / token appears in diagnostics.
+        raise ServiceError("Η Microsoft δεν επέστρεψε uploadUrl στο createUploadSession. "
+                           "Το Excel παραμένει ασφαλές στο Supabase.")
     parsed = urlparse(upload_url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not (
-        host.endswith(".1drv.com") or host.endswith(".sharepoint.com") or host.endswith(".onedrive.com")
-        or host in {"api.onedrive.com", "storage.live.com"} or host.endswith(".storage.live.com")
-    ):
-        raise ServiceError("Η Microsoft επέστρεψε μη έγκυρη διεύθυνση upload.")
+    allowed = (
+        host.endswith(".1drv.com")
+        or host in {"1drv.com", "api.onedrive.com", "onedrive.com", "storage.live.com"}
+        or host.endswith(".onedrive.com")
+        or host.endswith(".sharepoint.com")
+        or host.endswith(".storage.live.com")
+    )
+    try:
+        valid_port = parsed.port in (None, 443)
+    except ValueError:
+        valid_port = False
+    if (parsed.scheme != "https" or not host or not allowed or not valid_port
+            or parsed.username is not None or parsed.password is not None
+            or parsed.fragment or len(upload_url) > 12000):
+        # uploadUrl is a bearer-equivalent secret: NEVER surface path/query or
+        # the full URL. A strict ASCII hostname alone is safe for troubleshooting.
+        import re
+        safe_host = host if re.fullmatch(r"[a-z0-9.-]{1,253}", host) else "(μη αναγνώσιμο)"
+        reason = "μη επιτρεπτός host" if not allowed else "μη έγκυρο HTTPS URL"
+        raise ServiceError(
+            f"Η Microsoft επέστρεψε διεύθυνση upload με {reason}: {safe_host}. "
+            "Στείλτε μόνο το όνομα του host, ποτέ ολόκληρη τη διεύθυνση upload. "
+            "Δεν έγινε καμία εγγραφή στο OneDrive."
+        )
     total = len(data)
     if not total or total > MAX_BYTES:
         raise ServiceError("Μη έγκυρο μέγεθος Excel για OneDrive.")
