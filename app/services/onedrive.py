@@ -117,7 +117,26 @@ def _graph(token: str, method: str, path: str, **kwargs) -> httpx.Response:
             r = client.request(method, GRAPH + path, headers={"Authorization": "Bearer " + token,
                                                                 **kwargs.pop("headers", {})}, **kwargs)
         if r.status_code in (409, 412):
-            raise Conflict("Το online Excel άλλαξε στο OneDrive. Δεν θα αντικαταστήσουμε νεότερο αρχείο.")
+            # HTTP 409 from createUploadSession is NOT proof that the remote
+            # Excel changed. Only 412 is a failed If-Match precondition.
+            # Extract the documented Microsoft error *code*, never the body:
+            # Graph messages may include preauthorized URLs or identifiers.
+            import re
+            error_code = ""
+            try:
+                detail = r.json().get("error", {}).get("code", "")
+                if isinstance(detail, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", detail):
+                    error_code = " · " + detail
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if r.status_code == 412:
+                raise Conflict("Το OneDrive απέρριψε το If-Match (HTTP 412" + error_code
+                               + "). Η έκδοση του αρχείου άλλαξε. Δεν έγινε αντικατάσταση.")
+            raise Conflict("Η Microsoft απέρριψε τη δημιουργία upload session "
+                           "(HTTP 409" + error_code + "). Αυτό μπορεί να είναι κλείδωμα "
+                           "ή σύγκρουση αρχείου, όχι απαραίτητα νέα έκδοση. "
+                           "Το αντίγραφο Supabase παραμένει ασφαλές. "
+                           "Κλείστε το Excel Online και ελέγξτε την αιτία πριν από νέα προσπάθεια.")
         if r.status_code == 401:
             raise ServiceError("Η εξουσιοδότηση OneDrive έληξε. Συνδεθείτε ξανά από τις Ρυθμίσεις.")
         if r.status_code == 403:
@@ -326,10 +345,12 @@ def assert_ready_for_transfer(imp: dict) -> None:
 
 
 def _upload(drive: str, item: str, expected_etag: str, data: bytes, token: str) -> None:
-    # The upload-session endpoint explicitly supports conditional If-Match for OneDrive Personal.
+    # This is an UPDATE of an existing item by its stable item id. Microsoft
+    # documents that no JSON body is needed. In particular, don't request
+    # "conflictBehavior: replace" (a filename collision policy for new items).
+    # Keep If-Match so a concurrent change fails with HTTP 412.
     resp = _graph(token, "POST", f"/drives/{drive}/items/{item}/createUploadSession",
-                  headers={"If-Match": expected_etag},
-                  json={"item": {"@microsoft.graph.conflictBehavior": "replace"}}).json()
+                  headers={"If-Match": expected_etag}).json()
     upload_url = resp.get("uploadUrl")
     if not isinstance(upload_url, str) or not upload_url:
         # A successful Graph response is not guaranteed to contain a session URL.
