@@ -91,15 +91,48 @@ def totals(items: list[dict[str, Any]], groups: list[dict[str, Any]]) -> dict[st
     }
 
 
-def dashboard_snapshot() -> dict[str, Any]:
+def dashboard_snapshot_if_changed(last_version: int | None = None) -> dict[str, Any] | None:
+    """One cheap version query on idle polls; rebuild full dashboard only on changes.
+
+    The version and the data are read inside a single consistent snapshot.
+    OneDrive mirror lag is derived from the same snapshot, avoiding extra DB
+    pool connections/queries in every Streamlit fragment tick.
+    """
     from app.services import catalog
 
-    with snapshot() as conn:  # συνεπές στιγμιότυπο
+    with snapshot() as conn:
         version = get_version(conn)
+        if last_version is not None and version == last_version:
+            return None
         items = active_items(conn)
         imp = catalog.active_import(conn)
+        mirror = conn.execute(
+            "SELECT value FROM app_settings WHERE key='onedrive.bound'"
+        ).fetchone()
+    mirror_pending = False
+    if imp is not None and mirror:
+        try:
+            binding = json.loads(mirror["value"])
+            mirror_pending = (
+                int(binding["import_id"]) == int(imp["id"])
+                and int(binding["synced_version"]) < int(imp["working_version"])
+            )
+        except (TypeError, ValueError, KeyError):
+            # Never break the secretary dashboard due to a malformed optional setting.
+            mirror_pending = False
     groups = aggregate(items)
-    return {"version": version, "items": items, "groups": groups, "totals": totals(items, groups), "import": imp}
+    return {
+        "version": version, "items": items, "groups": groups,
+        "totals": totals(items, groups), "import": imp,
+        "onedrive_pending": mirror_pending,
+    }
+
+
+def dashboard_snapshot() -> dict[str, Any]:
+    """Full snapshot for existing backend/tests; polling may use the conditional variant."""
+    result = dashboard_snapshot_if_changed()
+    assert result is not None
+    return result
 
 
 def scanner_snapshot() -> dict[str, Any]:
