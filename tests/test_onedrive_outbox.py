@@ -88,8 +88,10 @@ def test_two_transfers_continue_when_onedrive_locked_and_replay_after(app_env, s
     assert calls[-1] == "success"
     with io.BytesIO(cloud["data"]) as stream:
         workbook = openpyxl.load_workbook(stream, read_only=True)
-        source_barcodes = [cell.value for cell in workbook["΄Ετοιμα προϊόντα"]["H"]]
-        dest_barcodes = [cell.value for cell in workbook["Σβησμενα "]["H"]]
+        source_barcodes = [row[0] for row in workbook["΄Ετοιμα προϊόντα"].iter_rows(
+            min_col=8, max_col=8, values_only=True)]
+        dest_barcodes = [row[0] for row in workbook["Σβησμενα "].iter_rows(
+            min_col=8, max_col=8, values_only=True)]
         workbook.close()
     assert "VS11486" not in source_barcodes
     assert "VS11487" not in source_barcodes
