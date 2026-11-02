@@ -546,5 +546,6 @@ def inspect_pending() -> dict:
 
 
 def retry_sync() -> bool:
-    with lease(catalog.EXCEL_LOCK, busy_message="Εκτελείται άλλη αλλαγή Excel. Δοκιμάστε ξανά."):
-        return sync_pending_under_lease()
+    """Drain all durable pending transfers in order, preserving the latest online workbook."""
+    from app.services.onedrive_outbox import retry_sync as flush
+    return bool(flush()["synced"])
