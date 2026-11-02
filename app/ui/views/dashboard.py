@@ -108,12 +108,36 @@ def _groups_tab(groups: list[dict[str, Any]], items_by_id: dict[int, dict[str, A
                  column_config={"Συνολικά κιλά": st.column_config.TextColumn(width="small")})
     total = sum((Decimal(g["total"]) for g in groups), Decimal(0))
     st.markdown(f"<div class='total-line'>Γενικό σύνολο: {format_kilos(total)} κιλά</div>", unsafe_allow_html=True)
-    st.caption("Ανάπτυξη ομάδας για τα barcode που τη συνθέτουν:")
-    for g in groups:
-        missing = f" · ⚠ {g['missing_kilos']} χωρίς κιλά" if g["missing_kilos"] else ""
-        with st.expander(f"{g['product']}  —  {g['pelatis']}  —  {g['total_display']} κιλά  ({g['count']}){missing}"):
-            st.dataframe(pd.DataFrame([{"Barcode": b["barcode"], "Κιλά": format_kilos(b["kila"])} for b in g["barcodes"]]),
-                         hide_index=True, width="stretch")
+    if len(groups) > 15:
+        # Streamlit renders expander contents even when the expander is closed.
+        # Hundreds of dataframes rebuilt on each refresh used to keep the
+        # browser constantly loading. For large batches render ONE detail list.
+        st.caption("Επιλέξτε ομάδα για να δείτε τα barcode που την αποτελούν:")
+        options = {str(i): g for i, g in enumerate(groups)}
+        chosen = st.selectbox(
+            "Αναλυτικά barcode ομάδας",
+            options=list(options),
+            format_func=lambda key: (
+                f"{options[key]['product']} — {options[key]['pelatis']} "
+                f"— {options[key]['total_display']} κιλά ({options[key]['count']})"
+            ),
+            key="dash_selected_group",
+        )
+        if chosen is not None:
+            g = options[chosen]
+            st.dataframe(pd.DataFrame([
+                {"Barcode": b["barcode"], "Κιλά": format_kilos(b["kila"])}
+                for b in g["barcodes"]
+            ]), hide_index=True, width="stretch")
+    else:
+        st.caption("Ανάπτυξη ομάδας για τα barcode που τη συνθέτουν:")
+        for g in groups:
+            missing = f" · ⚠ {g['missing_kilos']} χωρίς κιλά" if g["missing_kilos"] else ""
+            with st.expander(f"{g['product']}  —  {g['pelatis']}  —  {g['total_display']} κιλά  ({g['count']}){missing}"):
+                st.dataframe(pd.DataFrame([
+                    {"Barcode": b["barcode"], "Κιλά": format_kilos(b["kila"])}
+                    for b in g["barcodes"]
+                ]), hide_index=True, width="stretch")
 
 
 def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
