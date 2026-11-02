@@ -259,6 +259,9 @@ def _scanner_settings() -> None:
         gap = st.number_input("Μέγιστο κενό μεταξύ πλήκτρων (ms, 0 = χωρίς όριο)", 0, 5000,
                               int(cfg["scanner_inter_key_timeout_ms"]), step=50)
         refresh = st.number_input("Ανανέωση dashboard (δευτερόλεπτα)", 0.5, 60.0, float(cfg["dashboard_refresh_seconds"]), step=0.5)
+        st.caption("Η Γραμματεία ανανεώνεται τουλάχιστον κάθε 4 δευτερόλεπτα, "
+                   "ακόμη κι αν έχει αποθηκευτεί μικρότερη τιμή, ώστε να μην φορτώνει αδιάκοπα. "
+                   "Ο scanner έχει ξεχωριστό ρυθμό και δεν επηρεάζεται.")
         srefresh = st.number_input("Ανανέωση λίστας στην οθόνη σάρωσης (δευτερόλεπτα)", 0.5, 60.0,
                                    float(cfg["scanner_refresh_seconds"]), step=0.5)
         mode = st.selectbox("Τρόπος αφαίρεσης από «Έτοιμα προϊόντα»", ["auto", "shift", "clear"],
