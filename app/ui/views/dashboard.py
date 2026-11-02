@@ -53,7 +53,7 @@ def _do(action: str, item: dict[str, Any], **payload: Any) -> None:
             if res.get("warning"):
                 _flash("warning", "⚠ " + res["warning"])
             if res.get("onedrive_warning"):
-                _flash("error", "⚠ " + res["onedrive_warning"])
+                _flash("warning", "⚠ " + res["onedrive_warning"])
         elif action == "remove":
             backend.remove_item(p, item["id"], payload.get("reason", ""))
             _flash("info", f"Το {item['barcode']} αφαιρέθηκε από την ενεργή λίστα (καταγράφηκε στο ιστορικό).")
@@ -213,6 +213,19 @@ def page() -> None:
             st.caption(f"Ενεργό Excel: **{imp['original_filename']}** · εισαγωγή #{imp['id']} · "
                        f"{fmt_local(imp['imported_at'])} · αυτόματη ανανέωση κάθε {refresh:g} δευτ.")
         _show_flash()
+        # Read-only status: the secretary must know when the OneDrive copy is
+        # behind even though Supabase transfers are durable and operational.
+        if imp is not None:
+            try:
+                from app.services.onedrive import status as onedrive_status
+                mirror = onedrive_status()
+                if mirror["bound"] and mirror["pending"]:
+                    st.warning("Το online Excel στο OneDrive έχει εκκρεμείς ενημερώσεις. "
+                               "Οι μεταφορές καταχωρίζονται κανονικά στο Supabase. "
+                               "Για το τελευταίο Excel πηγαίνετε στις Ρυθμίσεις → Λήψεις. "
+                               "Για ενημέρωση OneDrive: Ρυθμίσεις → Επανάληψη συγχρονισμού.")
+            except ServiceError:
+                pass
         _confirm_box()
         _metrics(data["totals"])
         items = data["items"]
