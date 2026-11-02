@@ -28,4 +28,6 @@ jobs:
             tests/test_onedrive_upload_url.py \
             tests/test_onedrive_diff.py \
             tests/test_onedrive_reconcile.py \
-            tests/test_transfer.py
+            tests/test_transfer.py \
+            tests/test_dashboard_refresh.py \
+            tests/test_aggregation.py
