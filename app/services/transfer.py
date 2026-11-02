@@ -78,11 +78,10 @@ def transfer_item(item_id: int, actor: str) -> dict[str, Any]:
         _check_item(conn, item_id)
     recover_pending()
     with lease(EXCEL_LOCK, seconds=LEASE_SECONDS):
-        from app.services import onedrive
-        with connect() as c:
-            current = c.execute("SELECT * FROM excel_imports WHERE is_active=1").fetchone()
-        if current:
-            onedrive.assert_ready_for_transfer(dict(current))
+        # Η μεταφορά καταχωρίζεται πρώτα με ασφάλεια στο Supabase. Το OneDrive
+        # είναι καθρέφτης και δεν επιτρέπεται να σταματάει την αποθήκη επειδή
+        # κάποιος έχει το Excel Online ανοιχτό ή επειδή το Graph αρνήθηκε upload.
+        from app.services import onedrive, onedrive_outbox
         # --- 3. έλεγχοι (ξανά, μέσα στο lease) + journal "started" -----------
         with transaction() as conn:
             it, imp, prod = _check_item(conn, item_id)
@@ -142,13 +141,21 @@ def transfer_item(item_id: int, actor: str) -> dict[str, Any]:
         onedrive_warning = None
         if onedrive.bound_import(int(imp["id"])):
             try:
-                onedrive.sync_pending_under_lease()
-            except Exception:
-                log.exception("OneDrive sync pending after committed transfer %s", op_id)
+                mirror = onedrive_outbox.flush_under_lease(actor)
+                onedrive_synced = bool(mirror["synced"])
+            except Exception as exc:
+                # A remote conflict is NOT a failed warehouse transfer:
+                # product, history, and immutable workbook are already durable.
+                log.warning("OneDrive mirror pending after transfer %s (%s)",
+                            op_id, type(exc).__name__)
                 onedrive_synced = False
-                onedrive_warning = ("Η μεταφορά καταχωρίστηκε στο Supabase, αλλά το OneDrive δεν ενημερώθηκε. "
-                                    "Ρυθμίσεις → OneDrive → Επανάληψη συγχρονισμού. "
-                                    "Μην επαναλάβετε τη μεταφορά.")
+                onedrive_warning = (
+                    "Η μεταφορά ολοκληρώθηκε στο Supabase, αλλά το online OneDrive "
+                    "δεν έχει ενημερωθεί ακόμη. Οι επόμενες μεταφορές επιτρέπονται "
+                    "και παραμένουν ασφαλείς. Ρυθμίσεις → OneDrive → Επανάληψη "
+                    "συγχρονισμού όταν η Microsoft επιτρέψει την εγγραφή. "
+                    "ΜΗΝ επαναλάβετε την ίδια μεταφορά."
+                )
 
     with connect() as conn:
         op = dict(conn.execute("SELECT * FROM transfer_operations WHERE id=?", (op_id,)).fetchone())
