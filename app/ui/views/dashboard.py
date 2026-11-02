@@ -195,14 +195,29 @@ def page() -> None:
     st.title("Γραμματεία — Ζωντανή εικόνα")
     term = st.text_input("🔎 Αναζήτηση (barcode, είδος ή πελάτης)", key="dash_search", placeholder="π.χ. VS114 ή ΑΠΟΘΗΚΗ")
     try:
-        refresh = float(backend.public_config()["dashboard_refresh_seconds"])
+        configured_refresh = float(backend.public_config()["dashboard_refresh_seconds"])
     except Exception:
-        refresh = 1.5
+        configured_refresh = 4.0
+    # An unconditional Streamlit fragment every 1.5s keeps the app visibly
+    # "running" and continuously rebuilds dataframes. Four seconds gives a
+    # predictable near-live view while reducing server/browser load.
+    refresh = max(4.0, configured_refresh)
 
     @st.fragment(run_every=refresh)
     def live() -> None:
         try:
-            data = backend.dashboard(principal())
+            cached = st.session_state.get("secretary_snapshot")
+            # Don't reuse a snapshot from a previous deployment missing new
+            # fields, even when the underlying data version hasn't changed.
+            old_version = (int(cached["version"]) if cached is not None
+                           and "onedrive_pending" in cached else None)
+            fresh = backend.dashboard_if_changed(principal(), old_version)
+            if fresh is not None:
+                st.session_state["secretary_snapshot"] = fresh
+            data = st.session_state.get("secretary_snapshot")
+            if data is None:
+                data = backend.dashboard(principal())
+                st.session_state["secretary_snapshot"] = data
         except ServiceError as exc:
             show_error(exc)
             return
@@ -213,19 +228,13 @@ def page() -> None:
             st.caption(f"Ενεργό Excel: **{imp['original_filename']}** · εισαγωγή #{imp['id']} · "
                        f"{fmt_local(imp['imported_at'])} · αυτόματη ανανέωση κάθε {refresh:g} δευτ.")
         _show_flash()
-        # Read-only status: the secretary must know when the OneDrive copy is
-        # behind even though Supabase transfers are durable and operational.
-        if imp is not None:
-            try:
-                from app.services.onedrive import status as onedrive_status
-                mirror = onedrive_status()
-                if mirror["bound"] and mirror["pending"]:
-                    st.warning("Το online Excel στο OneDrive έχει εκκρεμείς ενημερώσεις. "
-                               "Οι μεταφορές καταχωρίζονται κανονικά στο Supabase. "
-                               "Για το τελευταίο Excel πηγαίνετε στις Ρυθμίσεις → Λήψεις. "
-                               "Για ενημέρωση OneDrive: Ρυθμίσεις → Επανάληψη συγχρονισμού.")
-            except ServiceError:
-                pass
+        # Already included in the consistent dashboard snapshot: no extra
+        # OneDrive credential or DB reads on the critical refresh path.
+        if imp is not None and data.get("onedrive_pending"):
+            st.warning("Το online Excel στο OneDrive έχει εκκρεμείς ενημερώσεις. "
+                       "Οι μεταφορές καταχωρίζονται κανονικά στο Supabase. "
+                       "Για το τελευταίο Excel πηγαίνετε στις Ρυθμίσεις → Λήψεις. "
+                       "Για ενημέρωση OneDrive: Ρυθμίσεις → Επανάληψη συγχρονισμού.")
         _confirm_box()
         _metrics(data["totals"])
         items = data["items"]
