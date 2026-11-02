@@ -82,6 +82,12 @@ def dashboard(p: Principal | None) -> dict[str, Any]:
     return aggregation.dashboard_snapshot()
 
 
+def dashboard_if_changed(p: Principal | None, last_version: int | None) -> dict[str, Any] | None:
+    """Fast, read-only conditional poll; cached UI stays responsive between scans."""
+    authorize(p, "dashboard")
+    return aggregation.dashboard_snapshot_if_changed(last_version)
+
+
 def candidates(p: Principal | None, item_id: int) -> list[dict[str, Any]]:
     authorize(p, "dashboard")
     return aggregation.candidates_for(item_id)
