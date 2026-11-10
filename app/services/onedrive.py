@@ -32,6 +32,7 @@ MAX_BYTES = 50 * 1024 * 1024
 CHUNK = 5 * 327680
 AUTH_KEY = "onedrive.oauth"
 BOUND_KEY = "onedrive.bound"
+ERROR_KEY = "onedrive.last_error"
 
 
 def configured() -> bool:
@@ -276,7 +277,9 @@ def status() -> dict:
     active = bool(b and imp and int(b["import_id"]) == int(imp["id"]))
     pending = active and int(b["synced_version"]) < int(imp["working_version"])
     return {"connected": connected_account(), "bound": active, "pending": pending,
-            "name": b.get("name") if active else None, "link": b.get("link") if active else None}
+            "name": b.get("name") if active else None, "link": b.get("link") if active else None,
+            "synced_version": int(b["synced_version"]) if active else None,
+            "synced_at": b.get("synced_at") if active else None}
 
 
 def activate_staged(stage: dict, actor: str, confirm_replace: bool = False) -> dict:

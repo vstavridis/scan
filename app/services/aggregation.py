@@ -109,6 +109,8 @@ def dashboard_snapshot_if_changed(last_version: int | None = None) -> dict[str, 
         mirror = conn.execute(
             "SELECT value FROM app_settings WHERE key='onedrive.bound'"
         ).fetchone()
+        from app.services import transfer
+        sync = transfer.sync_status(conn)
     mirror_pending = False
     if imp is not None and mirror:
         try:
@@ -125,6 +127,8 @@ def dashboard_snapshot_if_changed(last_version: int | None = None) -> dict[str, 
         "version": version, "items": items, "groups": groups,
         "totals": totals(items, groups), "import": imp,
         "onedrive_pending": mirror_pending,
+        "onedrive_bound": bool(imp is not None and mirror),
+        "sync": sync,
     }
 
 

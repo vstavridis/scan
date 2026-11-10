@@ -162,6 +162,45 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+-- ===========================================================================
+-- Αναβάθμιση σχήματος v3 (ιδεμποτική — ασφαλής σε κάθε εκκίνηση και σε υπάρχουσα βάση):
+--   * ουρά μεταφορών: η μεταφορά καταχωρίζεται αμέσως (queued) και το Excel ενημερώνεται
+--     στο παρασκήνιο, πολλές μεταφορές μαζί σε ΜΙΑ νέα έκδοση (seq = σειρά μέσα στην έκδοση)
+--   * επαναφορά λανθασμένης μεταφοράς (kind='restore', restore_of, reverted_at)
+--   * διόρθωση barcode στα «Προς έλεγχο» (active_items.original_barcode)
+-- ===========================================================================
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'transfer';
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS seq INTEGER;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS restore_of BIGINT;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS reverted_at TEXT;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS reverted_by TEXT;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS queued_at TEXT;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE transfer_operations ADD COLUMN IF NOT EXISTS kila TEXT;
+ALTER TABLE active_items ADD COLUMN IF NOT EXISTS original_barcode TEXT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transfer_operations_status_check'
+                   AND pg_get_constraintdef(oid) LIKE '%queued%') THEN
+        ALTER TABLE transfer_operations DROP CONSTRAINT IF EXISTS transfer_operations_status_check;
+        ALTER TABLE transfer_operations ADD CONSTRAINT transfer_operations_status_check
+            CHECK (status IN ('queued', 'started', 'completed', 'failed'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transfer_operations_kind_check') THEN
+        ALTER TABLE transfer_operations ADD CONSTRAINT transfer_operations_kind_check
+            CHECK (kind IN ('transfer', 'restore'));
+    END IF;
+END $$;
+-- Μία ενεργή μεταφορά ανά προϊόν (μια επαναφορά "ελευθερώνει" το προϊόν για νέα μεταφορά).
+DROP INDEX IF EXISTS ux_transfer_once;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_transfer_active ON transfer_operations(product_record_id)
+    WHERE kind = 'transfer' AND status IN ('queued', 'started', 'completed') AND reverted_at IS NULL;
+-- Μία επαναφορά ανά μεταφορά.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_restore_once ON transfer_operations(restore_of)
+    WHERE kind = 'restore' AND status IN ('queued', 'started', 'completed');
+CREATE INDEX IF NOT EXISTS ix_transfer_status ON transfer_operations(status);
+CREATE INDEX IF NOT EXISTS ix_transfer_item ON transfer_operations(active_item_id);
+
 -- Ασφάλεια Supabase: οι πίνακες ΔΕΝ πρέπει να είναι προσβάσιμοι μέσω του δημόσιου REST API
 -- (anon / authenticated keys). Η εφαρμογή συνδέεται ως owner (postgres) και δεν επηρεάζεται.
 DO $$

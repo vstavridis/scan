@@ -91,6 +91,10 @@ div[data-testid="stDataFrame"] { border: 1px solid var(--wh-line); border-radius
 .b-ok { background:#dcfce7; color:#14532d; } .b-ambiguous, .b-unknown { background:#fee2e2; color:#7f1d1d; }
 .b-dup { background:#fef9c3; color:#713f12; }
 .mono { font-family: Consolas, "Roboto Mono", monospace; font-weight: 700; }
+.sync-card { background: var(--wh-card); border: 1px solid var(--wh-line); border-radius: 10px;
+             padding: 12px 16px; min-height: 5.2rem; }
+.sync-label { font-size: 0.85rem; font-weight: 600; color: var(--wh-ink-2); }
+.sync-value { font-size: 1.25rem; font-weight: 800; color: var(--wh-ink); margin-top: 6px; }
 .total-line { font-size: 1.35rem; font-weight: 800; margin-top: .4rem; color: var(--wh-ink); }
 /* Χωρίς "θάμπωμα" κατά τις περιοδικές ανανεώσεις (st.fragment run_every) */
 [data-stale="true"] { opacity: 1 !important; transition: none !important; }

@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS active_items (
     status              TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'transferred', 'removed')),
     closed_at           TEXT,
     closed_by           TEXT,
-    close_reason        TEXT
+    close_reason        TEXT,
+    original_barcode    TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_active_barcode ON active_items(barcode_norm) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS ix_active_status ON active_items(status);
@@ -122,7 +123,15 @@ CREATE TABLE IF NOT EXISTS transfer_operations (
     import_id          BIGINT NOT NULL REFERENCES excel_imports(id),
     barcode            TEXT    NOT NULL,
     fingerprint        TEXT    NOT NULL,
-    status             TEXT    NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+    status             TEXT    NOT NULL CHECK (status IN ('queued', 'started', 'completed', 'failed')),
+    kind               TEXT    NOT NULL DEFAULT 'transfer' CHECK (kind IN ('transfer', 'restore')),
+    seq                INTEGER,
+    restore_of         INTEGER,
+    reverted_at        TEXT,
+    reverted_by        TEXT,
+    queued_at          TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    kila               TEXT,
     mode               TEXT,
     requested_by       TEXT    NOT NULL,
     started_at         TEXT    NOT NULL,
@@ -137,8 +146,12 @@ CREATE TABLE IF NOT EXISTS transfer_operations (
     warning            TEXT,
     error              TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_transfer_once ON transfer_operations(product_record_id)
-    WHERE status IN ('started', 'completed');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_transfer_active ON transfer_operations(product_record_id)
+    WHERE kind = 'transfer' AND status IN ('queued', 'started', 'completed') AND reverted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_restore_once ON transfer_operations(restore_of)
+    WHERE kind = 'restore' AND status IN ('queued', 'started', 'completed');
+CREATE INDEX IF NOT EXISTS ix_transfer_status ON transfer_operations(status);
+CREATE INDEX IF NOT EXISTS ix_transfer_item ON transfer_operations(active_item_id);
 
 -- Leases για ενέργειες που διαρκούν πέρα από ένα DB transaction (εγγραφή Excel).
 CREATE TABLE IF NOT EXISTS app_locks (

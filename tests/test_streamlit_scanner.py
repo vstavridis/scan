@@ -21,7 +21,7 @@ import httpx
 import pytest
 
 from app import backend
-from tests.conftest import (ROOT, activate_workbook, configure_env, free_port, login, pg_admin_url,
+from tests.conftest import (ROOT, activate_workbook, configure_env, free_port, login, pg_admin_url, scan,
                             temp_pg_database)
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -267,7 +267,7 @@ def test_two_computers_stay_in_sync(browser, tmp_path, synthetic_master):
         dctx = browser.new_context(viewport={"width": 1500, "height": 1100})
         desk = dctx.new_page()
         open_page(desk, srv.url, "", "Μαρία")
-        desk.wait_for_selector("text=Γραμματεία — Ζωντανή εικόνα", timeout=30000)
+        desk.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
         wedge(scanner_page, "VS11486")
         wedge(scanner_page, "VS11487")
         t = time.perf_counter()
@@ -340,32 +340,32 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         open_page(page, srv.url, "", "Μαρία")   # όνομα για το ιστορικό μέσω της διεύθυνσης (?user=)
-        page.wait_for_selector("text=Γραμματεία — Ζωντανή εικόνα", timeout=30000)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
         assert page.locator('input[aria-label="Κωδικός"]').count() == 0
         assert page.locator("text=Σύνδεση").count() == 0
         sidebar = page.locator('[data-testid="stSidebar"]')
         assert sidebar.locator("text=Αποθήκη Barcode").count() == 0          # χωρίς τίτλο στο sidebar
         assert sidebar.locator("input").count() == 0                         # χωρίς πεδίο ονόματος
-        for link, marker in (("Scanner / Αποθήκη", ".whs-root"), ("Ιστορικό", "text=Ιστορικό σκαναρισμάτων"),
+        for link, marker in (("Scanner", ".whs-root"), ("Ιστορικό", "text=Μεταφορές & Επαναφορά"),
                              ("Ρυθμίσεις", "text=Ανέβασμα νέου Excel"),
-                             ("Γραμματεία / Dashboard", "text=Γραμματεία — Ζωντανή εικόνα")):
+                             ("Dashboard", "text=Dashboard — Ζωντανή εικόνα")):
             page.get_by_role("link", name=link).click()
             page.wait_for_selector(marker, timeout=30000)
             assert page.locator('[data-testid="stException"]').count() == 0, link
         assert "user=" in page.url  # το όνομα μένει στο URL (σελιδοδείκτης)
         # σκανάρισμα + μεταφορά με ένα κλικ, χωρίς login ή δεύτερη επιβεβαίωση
-        page.get_by_role("link", name="Scanner / Αποθήκη").click()
+        page.get_by_role("link", name="Scanner").click()
         page.wait_for_selector(".whs-root")
         wait_connected(page)
         page.mouse.click(700, 600)
         wedge(page, "VS11486")
         page.wait_for_selector(".whs-fb-ok", timeout=15000)
-        page.get_by_role("link", name="Γραμματεία / Dashboard").click()
+        page.get_by_role("link", name="Dashboard").click()
         page.get_by_role("tab", name="Αναλυτική λίστα").click()
         page.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
         page.wait_for_selector("text=μεταφέρθηκε στα Σβησμένα", timeout=60000)
         log = backend.audit_log(login("admin"))
-        assert next(r for r in log if r["action"] == "transfer.completed")["actor"] == "Μαρία"
+        assert next(r for r in log if r["action"] == "transfer.queued")["actor"] == "Μαρία"
         assert not errors, errors
         ctx.close()
 
@@ -405,4 +405,89 @@ def test_dashboard_metric_cards_have_high_contrast(browser, tmp_path, synthetic_
             .map(t => ({fg: getComputedStyle(t.querySelector('p')).color, bg: getComputedStyle(t).backgroundColor}))""")
         assert tabs and all(_contrast(t["fg"], t["bg"]) >= 4.5 for t in tabs), tabs
         page.screenshot(path=str(tmp_path / f"dashboard-{color_scheme}.png"))
+        ctx.close()
+
+
+def test_bulk_transfer_correction_remove_and_restore(browser, tmp_path, synthetic_master):
+    """Μαζική μεταφορά με σύνολο κιλών, αφαίρεση χωρίς επιβεβαίωση, διόρθωση barcode (μολύβι),
+    επαναφορά από το Ιστορικό και πίνακας συγχρονισμού."""
+    from tests.conftest import working_file
+    from tests.test_transfer import _barcodes
+    from app.services import transfer as transfer_service
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        p = login("scanner")
+        scan(p, "VS11486", "VS11487", "VS90002", "V90003")
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        open_page(page, srv.url, "", "Μαρία")
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        assert page.get_by_role("link", name="Dashboard").count() == 1
+        assert page.get_by_role("link", name="Scanner").count() == 1
+
+        # Διόρθωση barcode από τα «Προς έλεγχο»: V90003 -> VS90003 (σκισμένη πινακίδα)
+        page.get_by_role("tab", name="Προς έλεγχο").click()
+        page.get_by_role("button", name="✏️").first.click()
+        field = page.get_by_label("Σωστό barcode")
+        field.fill("VS90003")
+        page.get_by_role("button", name="💾 Αποθήκευση").click()
+        page.wait_for_selector("text=Δεν υπάρχουν barcode προς έλεγχο", timeout=20000)
+        dash = backend.dashboard(login("secretary"))
+        assert sorted(i["barcode"] for i in dash["items"]) == ["VS11486", "VS11487", "VS90002", "VS90003"]
+        assert all(i["state"] == "ok" for i in dash["items"])
+        assert [i["barcode"] for i in backend.scanner_view(p)["items"]].count("VS90003") == 1
+
+        # Μαζική μεταφορά: επιλογή 2 barcode -> σύνολο κιλών -> ένα κλικ
+        page.get_by_role("tab", name="Αναλυτική λίστα").click()
+        boxes = page.locator('[data-testid="stCheckbox"]')
+        boxes.nth(0).click()
+        page.wait_for_selector("text=Επιλεγμένα: 1", timeout=10000)
+        boxes.nth(1).click()
+        page.wait_for_selector("text=Επιλεγμένα: 2", timeout=10000)
+        t = time.perf_counter()
+        page.get_by_role("button", name="Μεταφορά επιλεγμένων στα Σβησμένα (2)").click()
+        page.wait_for_selector("text=Μεταφέρθηκαν 2 barcode στα Σβησμένα", timeout=20000)
+        page.wait_for_function("document.querySelectorAll('[data-testid=\"stCheckbox\"]').length === 2",
+                               timeout=10000)
+        print(f"\n[μέτρηση] μαζική μεταφορά ορατή στη λίστα σε {time.perf_counter() - t:.1f}s")
+
+        # Αφαίρεση χωρίς βήμα επιβεβαίωσης
+        page.get_by_role("button", name="✕").first.click()
+        page.wait_for_selector("text=αφαιρέθηκε από την ενεργή λίστα", timeout=20000)
+        assert page.locator("text=Ναι, αφαίρεση").count() == 0
+        assert len(backend.dashboard(login("secretary"))["items"]) == 1
+
+        # ο background worker ενημερώνει το Excel
+        deadline = time.time() + 60
+        while backend.sync_status(login("secretary"))["pending"] and time.time() < deadline:
+            time.sleep(0.5)
+        assert backend.sync_status(login("secretary"))["pending"] == 0
+        moved = [b for b in ("VS11486", "VS11487", "VS90002", "VS90003")
+                 if b in _barcodes(working_file(tmp_path), "Σβησμενα ")]
+        assert len(moved) == 2
+
+        # Ιστορικό: πίνακας συγχρονισμού + επαναφορά
+        page.get_by_role("link", name="Ιστορικό").click()
+        page.get_by_role("tab", name="Συγχρονισμός").click()
+        page.wait_for_selector("text=Μεταφορές σε εκκρεμότητα", timeout=20000)
+        page.wait_for_selector("text=Το Excel στο Supabase είναι ενημερωμένο", timeout=20000)
+        page.get_by_role("tab", name="Μεταφορές & Επαναφορά").click()
+        page.get_by_role("button", name="↩ Επαναφορά στα Έτοιμα").first.click()
+        page.wait_for_selector("text=επανέρχεται στα Έτοιμα προϊόντα", timeout=20000)
+        deadline = time.time() + 60
+        while backend.sync_status(login("secretary"))["pending"] and time.time() < deadline:
+            time.sleep(0.5)
+        rows = transfer_service.list_transfers()
+        restored = [r for r in rows if r["reverted_at"]]
+        assert len(restored) == 1
+        work = working_file(tmp_path)
+        assert restored[0]["barcode"] in _barcodes(work, "΄Ετοιμα προϊόντα")
+        assert restored[0]["barcode"] not in _barcodes(work, "Σβησμενα ")
+        other = next(b for b in moved if b != restored[0]["barcode"])
+        assert other in _barcodes(work, "Σβησμενα ")
+        assert len(backend.dashboard(login("secretary"))["items"]) == 2
+        page.screenshot(path=str(tmp_path / "history.png"), full_page=True)
+        assert not errors, errors
         ctx.close()

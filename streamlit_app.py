@@ -49,7 +49,7 @@ def show_db_problem(exc: DatabaseConnectionError) -> None:
 
 @st.cache_resource(show_spinner="Σύνδεση με τη βάση δεδομένων…")
 def _startup() -> bool:
-    backend.startup()  # σχήμα βάσης + recovery, μία φορά ανά διεργασία
+    backend.startup(start_worker=True)  # σχήμα βάσης + recovery + background συγχρονισμός Excel
     return True
 
 
@@ -87,8 +87,8 @@ if st.session_state.pop("onedrive_auth_message", None):
 
 # Πρόσβαση: Private app στο Streamlit Community Cloud (μόνο προσκεκλημένοι). Όλες οι οθόνες για όλους.
 nav = st.navigation([
-    st.Page(dashboard.page, title="Γραμματεία / Dashboard", icon="📊", url_path="dashboard", default=True),
-    st.Page(scanner.page, title="Scanner / Αποθήκη", icon="📟", url_path="scanner"),
+    st.Page(dashboard.page, title="Dashboard", icon="📊", url_path="dashboard", default=True),
+    st.Page(scanner.page, title="Scanner", icon="📟", url_path="scanner"),
     st.Page(history.page, title="Ιστορικό", icon="🗂️", url_path="history"),
     st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"),
 ])

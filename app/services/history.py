@@ -32,6 +32,17 @@ def _local_day_bounds(d: date, end: bool = False) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _transfer_label(r: Any) -> str:
+    item_status, op_status = r["item_status"], r["transfer_op_status"]
+    if r["transfer_reverted_at"]:
+        return "Επαναφέρθηκε στα Έτοιμα" if item_status != "transferred" else "Μεταφέρθηκε"
+    if item_status == "transferred" and op_status in ("queued", "started"):
+        return "Μεταφέρθηκε (ενημέρωση Excel σε εξέλιξη)"
+    if r["result"] == "duplicate":
+        return "Μεταφέρθηκε" if item_status == "transferred" else "—"
+    return TRANSFER_LABELS.get(item_status, item_status)
+
+
 def query(
     date_from: date | None = None,
     date_to: date | None = None,
@@ -63,11 +74,16 @@ def query(
         params.append(transfer_status)
     sql = f"""
         SELECT s.*, a.status AS item_status, a.closed_at AS item_closed_at, a.closed_by AS item_closed_by,
-               a.close_reason, t.finished_at AS transfer_at, t.requested_by AS transfer_by, t.mode AS transfer_mode,
-               t.target_row AS transfer_target_row, i.original_filename AS import_filename
+               a.close_reason, a.barcode AS item_barcode, a.barcode_norm AS item_barcode_norm,
+               a.original_barcode AS item_original_barcode,
+               t.id AS transfer_op_id, t.status AS transfer_op_status, t.reverted_at AS transfer_reverted_at,
+               t.finished_at AS transfer_at, t.queued_at AS transfer_queued_at, t.requested_by AS transfer_by,
+               t.mode AS transfer_mode, t.target_row AS transfer_target_row, i.original_filename AS import_filename
         FROM scan_events s
         LEFT JOIN active_items a ON a.id = s.active_item_id
-        LEFT JOIN transfer_operations t ON t.active_item_id = s.active_item_id AND t.status = 'completed'
+        LEFT JOIN transfer_operations t ON t.id = (
+            SELECT MAX(x.id) FROM transfer_operations x WHERE x.active_item_id = s.active_item_id
+              AND x.kind = 'transfer' AND x.status IN ('queued', 'started', 'completed'))
         LEFT JOIN excel_imports i ON i.id = s.import_id
         WHERE {' AND '.join(where)}
         ORDER BY s.id DESC LIMIT ?"""
@@ -93,9 +109,13 @@ def query(
                 "diastaseis": snap.get("diastaseis", ""),
                 "pelatis": snap.get("pelatis", ""),
                 "kila": format_kilos(snap.get("kila")) if snap else "",
-                "transfer_status": TRANSFER_LABELS.get(r["item_status"], r["item_status"]) if r["result"] != "duplicate"
-                else ("Μεταφέρθηκε" if r["item_status"] == "transferred" else "—"),
-                "transfer_at_local": fmt_local(r["transfer_at"]) if r["transfer_at"] else "",
+                "transfer_status": _transfer_label(r),
+                "correction": (f"{r['barcode']} → {r['item_barcode']}"
+                               if r["item_original_barcode"] and r["item_barcode_norm"]
+                               and r["item_barcode_norm"] != r["barcode_norm"] else ""),
+                "transfer_op_id": r["transfer_op_id"],
+                "transfer_at_local": fmt_local(r["transfer_at"] or r["transfer_queued_at"])
+                if (r["transfer_at"] or r["transfer_queued_at"]) else "",
                 "transfer_by": r["transfer_by"] or "",
                 "transfer_mode": r["transfer_mode"] or "",
                 "import_id": r["import_id"],
@@ -115,6 +135,7 @@ EXPORT_COLUMNS = [
     ("diastaseis", "Διαστάσεις"),
     ("kila", "Κιλά"),
     ("pelatis", "Πελάτης"),
+    ("correction", "Διόρθωση barcode"),
     ("transfer_status", "Κατάσταση μεταφοράς"),
     ("transfer_at_local", "Ημ/νία μεταφοράς"),
     ("transfer_by", "Χρήστης μεταφοράς"),

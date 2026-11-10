@@ -25,7 +25,7 @@ from app.config import ConfigError, get_settings
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 _DIR = Path(__file__).resolve().parent
 _init_lock = threading.Lock()
 _initialized: set[str] = set()

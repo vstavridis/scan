@@ -15,7 +15,7 @@ from app.auth import Principal, authorize, make_principal
 from app.config import get_settings
 from app.db.database import init_db
 from app.logging_setup import setup_logging
-from app.services import aggregation, catalog, history, scans, settings_service, transfer
+from app.services import aggregation, excel_worker, catalog, history, scans, settings_service, transfer
 from app.services.errors import ServiceError
 
 log = logging.getLogger(__name__)
@@ -23,17 +23,22 @@ log = logging.getLogger(__name__)
 _started = False
 
 
-def startup() -> None:
-    """Μία φορά ανά διεργασία: σχήμα βάσης + recovery μεταφορών που διακόπηκαν."""
+def startup(start_worker: bool = False) -> None:
+    """Μία φορά ανά διεργασία: σχήμα βάσης + recovery μεταφορών που διακόπηκαν.
+
+    start_worker=True (εφαρμογή Streamlit): ξεκινά τον background συγχρονισμό του Excel, που
+    ολοκληρώνει και ό,τι έμεινε στην ουρά από προηγούμενη εκτέλεση.
+    """
     global _started
-    if _started:
-        return
-    setup_logging()
-    init_db()
-    recovered = transfer.recover_pending()
-    if recovered:
-        log.warning("Transfer recovery: %s", recovered)
-    _started = True
+    if not _started:
+        setup_logging()
+        init_db()
+        recovered = transfer.recover_pending()
+        if recovered:
+            log.warning("Transfer recovery: %s", recovered)
+        _started = True
+    if start_worker:
+        excel_worker.start()
 
 
 # --------------------------------------------------------------------------- ταυτότητα
@@ -96,6 +101,51 @@ def candidates(p: Principal | None, item_id: int) -> list[dict[str, Any]]:
 def transfer_item(p: Principal | None, item_id: int) -> dict[str, Any]:
     authorize(p, "transfer")
     return transfer.transfer_item(item_id, p.actor)  # type: ignore[union-attr]
+
+
+def queue_transfers(p: Principal | None, item_ids: list[int]) -> dict[str, Any]:
+    """Γρήγορη καταχώριση μίας ή πολλών μεταφορών· το Excel ενημερώνεται στο παρασκήνιο."""
+    authorize(p, "transfer")
+    res = transfer.queue_transfers(item_ids, p.actor)  # type: ignore[union-attr]
+    if res["queued"]:
+        excel_worker.kick()
+    return res
+
+
+def restore_transfer(p: Principal | None, transfer_op_id: int, wait: bool = False) -> dict[str, Any]:
+    """Επαναφορά λανθασμένης μεταφοράς στα «Έτοιμα προϊόντα» (τελευταία ελεύθερη σειρά)."""
+    authorize(p, "transfer")
+    res = transfer.restore_transfer(transfer_op_id, p.actor, wait=wait)  # type: ignore[union-attr]
+    excel_worker.kick()
+    return res
+
+
+def list_transfers(p: Principal | None, barcode: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    authorize(p, "dashboard")
+    return transfer.list_transfers(limit=min(max(limit, 1), 1000), barcode=barcode)
+
+
+def sync_status(p: Principal | None) -> dict[str, Any]:
+    authorize(p, "dashboard")
+    out = transfer.sync_status()
+    out["worker_running"] = excel_worker.running()
+    try:
+        from app.services import onedrive
+        out["onedrive"] = onedrive.status()
+    except Exception:
+        out["onedrive"] = {"bound": False, "pending": False}
+    return out
+
+
+def sync_now(p: Principal | None) -> dict[str, Any]:
+    authorize(p, "transfer")
+    return transfer.sync_now(p.actor)  # type: ignore[union-attr]
+
+
+def correct_item(p: Principal | None, item_id: int, barcode: str) -> dict[str, Any]:
+    """Διόρθωση barcode που χτυπήθηκε λάθος (στα «Προς έλεγχο»)."""
+    authorize(p, "transfer")
+    return transfer.correct_item(item_id, barcode[:128], p.actor)  # type: ignore[union-attr]
 
 
 def resolve_item(p: Principal | None, item_id: int, product_record_id: int) -> dict[str, Any]:

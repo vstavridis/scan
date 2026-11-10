@@ -244,17 +244,22 @@ def test_concurrent_transfers_are_safe(app_env, synthetic_master, tmp_path):
     for bc in ("VS11486", "VS11487", "VS90001"):
         assert tgt.count(bc) == 1                       # καμία διπλή εγγραφή, καμία χαμένη
         assert bc not in _barcodes(work, SRC)
-    assert _active_import()["working_version"] == 4
+    # οι ταυτόχρονες μεταφορές μπορεί να ομαδοποιηθούν σε λιγότερες εκδόσεις Excel
+    assert 2 <= _active_import()["working_version"] <= 4
 
 
 # ------------------------------------------------------------------ αποτυχίες χωρίς ψευδή επιτυχία
-def test_storage_failure_is_not_success(app_env, synthetic_master, monkeypatch, tmp_path):
+def test_storage_failure_keeps_transfer_queued_and_excel_unchanged(app_env, synthetic_master, monkeypatch,
+                                                                   tmp_path):
+    """Αποτυχία Supabase Storage: το Excel ΔΕΝ αλλάζει, η μεταφορά μένει στην ουρά και ολοκληρώνεται
+    όταν επανέλθει η αποθήκευση. Ποτέ ψευδής «επιτυχία Excel»."""
+    from app.services import transfer as transfer_service
+    from app.storage import StorageError
     activate_workbook(synthetic_master)
     scan(login("scanner"), "VS11486")
     sec = login("secretary")
     before = sha256(working_file(tmp_path))
     store = get_store()
-    from app.storage import StorageError
 
     def boom(path, data, content_type=None):
         raise StorageError("Supabase Storage μη διαθέσιμο (προσομοίωση)")
@@ -262,17 +267,44 @@ def test_storage_failure_is_not_success(app_env, synthetic_master, monkeypatch, 
     monkeypatch.setattr(store, "put", boom)
     with pytest.raises(ServiceError) as exc:
         backend.transfer_item(sec, _item_id("VS11486"))
-    assert exc.value.code == "transfer_failed" and "δεν αποθηκεύτηκε" in exc.value.message
+    assert exc.value.code == "transfer_failed" and "Αποθήκευση Excel" in exc.value.message
     monkeypatch.undo()
     assert sha256(working_file(tmp_path)) == before and _active_import()["working_version"] == 1
-    assert backend.dashboard(sec)["totals"]["active_barcodes"] == 1
-    assert backend.history_rows(sec)[0]["transfer_status"] != "Μεταφέρθηκε"
-    backend.transfer_item(sec, _item_id("VS11486"))      # μετά την αποκατάσταση: κανονικά
-    assert _active_import()["working_version"] == 2
+    status = backend.sync_status(sec)
+    assert status["pending"] == 1 and "Supabase Storage" in status["last_error"]["error"]
+    hist = backend.history_rows(sec)[0]
+    assert hist["transfer_status"] == "Μεταφέρθηκε (ενημέρωση Excel σε εξέλιξη)"
+    # επανέρχεται η αποθήκευση -> ο συγχρονισμός ολοκληρώνεται, μία φορά
+    out = transfer_service.process_pending()
+    assert len(out["completed"]) == 1 and _active_import()["working_version"] == 2
+    assert _barcodes(working_file(tmp_path), TGT).count("VS11486") == 1
+    status = backend.sync_status(sec)
+    assert status["pending"] == 0 and status["last_error"] is None and status["last_ok_at"]
+    assert backend.history_rows(sec)[0]["transfer_status"] == "Μεταφέρθηκε"
+
+
+def test_repeated_storage_failure_returns_item_to_active_list(app_env, synthetic_master, monkeypatch, tmp_path):
+    from app.services import transfer as transfer_service
+    from app.storage import StorageError
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    sec = login("secretary")
+    monkeypatch.setattr(get_store(), "put",
+                        lambda *a, **k: (_ for _ in ()).throw(StorageError("εκτός λειτουργίας")))
+    res = backend.queue_transfers(sec, [_item_id("VS11486")])
+    assert len(res["queued"]) == 1 and backend.dashboard(sec)["totals"]["active_barcodes"] == 0
+    for _ in range(transfer_service.MAX_ATTEMPTS):
+        with pytest.raises(ServiceError):
+            transfer_service.process_pending()
+    status = backend.sync_status(sec)
+    assert status["pending"] == 0 and status["failed_24h"][0]["barcode"] == "VS11486"
+    dash = backend.dashboard(sec)                        # επέστρεψε στην ενεργή λίστα, προς νέα μεταφορά
+    assert [i["barcode"] for i in dash["items"]] == ["VS11486"]
+    assert _active_import()["working_version"] == 1
 
 
 def test_corrupted_upload_is_detected(app_env, synthetic_master, monkeypatch, tmp_path):
-    """Αν το storage αποθηκεύσει άλλο περιεχόμενο από αυτό που στείλαμε, η μεταφορά ακυρώνεται."""
+    """Αν το storage αποθηκεύσει άλλο περιεχόμενο από αυτό που στείλαμε, δεν δεσμεύεται τίποτα."""
     activate_workbook(synthetic_master)
     scan(login("scanner"), "VS11486")
     store = get_store()
@@ -284,42 +316,53 @@ def test_corrupted_upload_is_detected(app_env, synthetic_master, monkeypatch, tm
     assert _active_import()["working_version"] == 1
 
 
-def test_writer_error_is_not_success(app_env, synthetic_master, monkeypatch):
+def test_unsafe_excel_change_fails_and_returns_item(app_env, synthetic_master, monkeypatch):
+    """Ο Excel engine αρνείται τη μετακίνηση: η μεταφορά αποτυγχάνει ρητά και το barcode επιστρέφει."""
     activate_workbook(synthetic_master)
-    scan(login("scanner"), "VS11486")
+    scan(login("scanner"), "VS11486", "VS11487")
     from app.excel.writer import UnsupportedStructureError
     from app.services import transfer as transfer_service
+    real = transfer_service.apply_moves
 
-    def fail(*a, **k):
-        raise UnsupportedStructureError("simulated")
+    def fail_first(src, out, moves, stop_on_error=True):
+        res = real(src, out, moves[1:], stop_on_error=stop_on_error)
+        return [UnsupportedStructureError("simulated")] + res
 
-    monkeypatch.setattr(transfer_service, "transfer_row", fail)
-    with pytest.raises(ServiceError) as exc:
-        backend.transfer_item(login("secretary"), _item_id("VS11486"))
-    assert "δεν έγινε" in exc.value.message
-    assert backend.dashboard(login("secretary"))["totals"]["active_barcodes"] == 1
+    monkeypatch.setattr(transfer_service, "apply_moves", fail_first)
+    sec = login("secretary")
+    res = backend.queue_transfers(sec, [_item_id("VS11486"), _item_id("VS11487")])
+    out = transfer_service.process_pending()
+    assert len(out["completed"]) == 1 and len(out["failed"]) == 1
+    dash = backend.dashboard(sec)
+    assert [i["barcode"] for i in dash["items"]] == ["VS11486"]   # μόνο η αποτυχημένη επέστρεψε
+    failed = backend.sync_status(sec)["failed_24h"][0]
+    assert failed["barcode"] == "VS11486" and "simulated" in failed["error"]
+    assert res["total_kilos"] == "828"
 
 
-def test_version_conflict_aborts_without_change(app_env, synthetic_master, monkeypatch, tmp_path):
-    """Αν το working Excel άλλαξε από άλλη διεργασία στο μεταξύ, η μεταφορά δεν δεσμεύεται."""
+def test_version_conflict_is_retried_without_change(app_env, synthetic_master, monkeypatch, tmp_path):
+    """Αν το working Excel άλλαξε από άλλη διεργασία, η μεταφορά ΔΕΝ δεσμεύεται και ξαναδοκιμάζεται."""
     activate_workbook(synthetic_master)
     scan(login("scanner"), "VS11486")
     from app.services import transfer as transfer_service
-    real_complete = transfer_service._complete
+    real_commit = transfer_service._commit
+    calls = {"n": 0}
 
-    def bump_then_complete(op_id, actor, import_id, base_version, *rest):
-        with transaction() as conn:   # άλλη "διεργασία" προχώρησε την έκδοση
-            conn.execute("UPDATE excel_imports SET working_version = working_version + 1 WHERE id=?", (import_id,))
-        return real_complete(op_id, actor, import_id, base_version, *rest)
+    def bump_then_commit(imp, *rest):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with transaction() as conn:   # άλλη "διεργασία" προχώρησε την έκδοση
+                conn.execute("UPDATE excel_imports SET working_version = working_version + 1 WHERE id=?",
+                             (imp["id"],))
+        return real_commit(imp, *rest)
 
-    monkeypatch.setattr(transfer_service, "_complete", bump_then_complete)
-    with pytest.raises(ServiceError) as exc:
-        backend.transfer_item(login("secretary"), _item_id("VS11486"))
-    assert "έκδοσης" in exc.value.message
+    monkeypatch.setattr(transfer_service, "_commit", bump_then_commit)
+    res = backend.transfer_item(login("secretary"), _item_id("VS11486"))
+    assert calls["n"] == 2 and res["ok"]                   # 1η απορρίφθηκε (έλεγχος έκδοσης), 2η πέτυχε
     with connect() as conn:
-        op = conn.execute("SELECT status FROM transfer_operations").fetchone()
-    assert op["status"] == "failed"
-    assert backend.dashboard(login("secretary"))["totals"]["active_barcodes"] == 1
+        op = conn.execute("SELECT status, attempts FROM transfer_operations").fetchone()
+    assert op["status"] == "completed" and op["attempts"] == 1
+    assert _barcodes(working_file(tmp_path), TGT).count("VS11486") == 1
 
 
 def test_recovery_of_interrupted_transfer(app_env, synthetic_master, monkeypatch, tmp_path):
@@ -333,17 +376,17 @@ def test_recovery_of_interrupted_transfer(app_env, synthetic_master, monkeypatch
     def crash(*a, **k):
         raise SystemExit("process killed (simulated)")
 
-    monkeypatch.setattr(transfer_service, "_complete", crash)
+    monkeypatch.setattr(transfer_service, "_commit", crash)
+    backend.queue_transfers(sec, [_item_id("VS11486")])
     with pytest.raises(SystemExit):
-        backend.transfer_item(sec, _item_id("VS11486"))
+        transfer_service.process_pending()
     monkeypatch.undo()
     with connect() as conn:
         assert conn.execute("SELECT status FROM transfer_operations").fetchone()["status"] == "started"
+        conn.execute("DELETE FROM app_locks")  # το lease της "νεκρής" διεργασίας θα έληγε μόνο του
     # Το Excel δεν άλλαξε (ο δείκτης έκδοσης δεν μετακινήθηκε)
     assert sha256(working_file(tmp_path)) == before and _active_import()["working_version"] == 1
-    assert transfer_service.recover_pending(max_age_seconds=0) == [{"operation_id": 1, "outcome": "rolled_back"}]
-    with connect() as conn:
-        assert conn.execute("SELECT status FROM transfer_operations").fetchone()["status"] == "failed"
-        conn.execute("DELETE FROM app_locks")  # το lease της "νεκρής" διεργασίας θα έληγε μόνο του
-    res = backend.transfer_item(sec, _item_id("VS11486"))   # η μεταφορά μπορεί να γίνει ξανά
-    assert res["new_version"] == 2
+    assert transfer_service.recover_pending(max_age_seconds=0) == [{"operation_id": 1, "outcome": "requeued"}]
+    out = transfer_service.process_pending()           # η ενέργεια ολοκληρώνεται μία φορά
+    assert out["completed"] == [1] and _active_import()["working_version"] == 2
+    assert _barcodes(working_file(tmp_path), TGT).count("VS11486") == 1

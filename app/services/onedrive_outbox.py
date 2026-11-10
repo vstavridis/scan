@@ -8,8 +8,8 @@ result and final workbook semantics are checked. A direct write uses If-Match.
 
 This is not a substitute for Microsoft Graph workbook APIs, which aren't
 supported by OneDrive Personal. An always-open file may temporarily refuse
-writes. No background delivery is claimed: retries occur on transfers and on
-the Settings retry button.
+writes. Retries happen automatically in the background Excel sync worker
+(app.services.excel_worker, about every minute while pending) and on the Settings retry button.
 """
 from __future__ import annotations
 
@@ -20,9 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.db.database import connect, transaction, bump_version
-from app.excel.package import XlsxPackage, row_fingerprint
-from app.excel.reader import FINGERPRINT_COLUMNS
-from app.excel.writer import TransferError, transfer_row
+from app.excel.writer import Move, TransferError, WorkbookEditor
 from app.services import catalog, onedrive
 from app.services.audit import audit
 from app.services.errors import Conflict, ServiceError
@@ -30,10 +28,11 @@ from app.services.locks import lease
 from app.services.normalize import normalize_barcode
 from app.services.onedrive_diff import compare_workbook_cells
 from app.storage import cached_get, get_store, sha256_bytes
+from app.timeutil import utcnow_iso
 
 log = logging.getLogger(__name__)
 QUEUE_JOURNAL = "onedrive.outbox"
-MAX_BATCH_OPS = 200
+MAX_BATCH_OPS = 2000
 
 
 def _same_cells(first: bytes, second: bytes) -> bool:
@@ -43,6 +42,12 @@ def _same_cells(first: bytes, second: bytes) -> bool:
 
 
 def _pending_ops(imp: dict, b: dict) -> list[dict]:
+    """Ολοκληρωμένες ενέργειες (μεταφορές/επαναφορές) που δεν έχουν περάσει ακόμη στο OneDrive.
+
+    Μία έκδοση Excel μπορεί να περιέχει πολλές ενέργειες (ομαδική μεταφορά): όλες έχουν ίδιο
+    base_version/new_object και σειρά `seq`. Κάθε έκδοση από synced_version έως working_version
+    πρέπει να καλύπτεται πλήρως, αλλιώς δεν γράφουμε τίποτα στο online αρχείο.
+    """
     start, end = int(b["synced_version"]), int(imp["working_version"])
     if start >= end:
         return []
@@ -50,16 +55,19 @@ def _pending_ops(imp: dict, b: dict) -> list[dict]:
         rows = db.execute(
             "SELECT * FROM transfer_operations WHERE import_id=? AND "
             "base_version>=? AND base_version<? AND status='completed' "
-            "ORDER BY base_version, id",
+            "ORDER BY base_version, COALESCE(seq, 0), id",
             (imp["id"], start, end),
         ).fetchall()
     ops = [dict(r) for r in rows]
-    if (len(ops) != end - start or len(ops) > MAX_BATCH_OPS
-            or [int(o["base_version"]) for o in ops] != list(range(start, end))
+    groups = _groups(ops)
+    if (len(ops) > MAX_BATCH_OPS
+            or [int(g[0]["base_version"]) for g in groups] != list(range(start, end))
             or not all(o.get("base_object") and o.get("new_object") and
                        o.get("excel_before_sha256") and o.get("excel_after_sha256")
                        for o in ops)
-            or ops[-1]["new_object"] != imp["working_object"]):
+            or any(len({(o["new_object"], o["excel_after_sha256"], o["base_object"]) for o in g}) != 1
+                   for g in groups)
+            or groups[-1][0]["new_object"] != imp["working_object"]):
         raise Conflict(
             "Δεν μπορεί να επαληθευτεί πλήρως η σειρά των εκκρεμών μεταφορών "
             "στο OneDrive. Η αποθήκη συνεχίζει στο Supabase, αλλά χρειάζεται "
@@ -68,11 +76,24 @@ def _pending_ops(imp: dict, b: dict) -> list[dict]:
     return ops
 
 
+def _groups(ops: list[dict]) -> list[list[dict]]:
+    """Ομαδοποίηση ενεργειών ανά έκδοση Excel (base_version), με τη σειρά εφαρμογής τους."""
+    groups: list[list[dict]] = []
+    for op in ops:
+        if groups and groups[-1][0]["base_version"] == op["base_version"]:
+            groups[-1].append(op)
+        else:
+            groups.append([op])
+    return groups
+
+
 def _version_data(ops: list[dict], count: int) -> bytes:
+    """Περιεχόμενο της έκδοσης μετά από `count` εκδόσεις-ομάδες (0 = πριν από όλες)."""
+    groups = _groups(ops)
     if count == 0:
-        op = ops[0]
+        op = groups[0][0]
         return cached_get(op["base_object"], op["excel_before_sha256"]).read_bytes()
-    op = ops[count - 1]
+    op = groups[count - 1][0]
     return cached_get(op["new_object"], op["excel_after_sha256"]).read_bytes()
 
 
@@ -80,7 +101,7 @@ def _remote_prefix(remote: bytes, ops: list[dict]) -> int:
     # It is possible that an earlier upload succeeded but its acknowledgement
     # was lost. Identify the latest *fully committed* matching worksheet state.
     # Reject any real external worksheet change (no automatic destructive merge).
-    for count in range(len(ops), -1, -1):
+    for count in range(len(_groups(ops)), -1, -1):
         if _same_cells(remote, _version_data(ops, count)):
             return count
     raise Conflict(
@@ -92,40 +113,38 @@ def _remote_prefix(remote: bytes, ops: list[dict]) -> int:
 
 def _replay(remote: bytes, ops: list[dict], prefix: int, expected: bytes,
             source_sheet: str, target_sheet: str) -> bytes:
+    """Εφαρμόζει τις εκκρεμείς εκδόσεις-ομάδες (μετά το prefix) στο online αρχείο, σε ένα πέρασμα.
+
+    Κάθε ενέργεια πρέπει να αλλάξει ΑΚΡΙΒΩΣ τις ίδιες γραμμές με αυτές που καταγράφηκαν.
+    """
+    pending = [op for g in _groups(ops)[prefix:] for op in g]
     with TemporaryDirectory(prefix="warehouse-onedrive-outbox-") as tmp:
         cur, nxt = Path(tmp) / "current.xlsx", Path(tmp) / "next.xlsx"
         cur.write_bytes(remote)
-        for op in ops[prefix:]:
-            try:
-                with XlsxPackage(cur) as pkg:
-                    row = next((r for r in pkg.iter_rows(source_sheet)
-                                if r.number == int(op["source_row"])), None)
-                    if row is None:
-                        raise Conflict("Η εκκρεμής γραμμή λείπει από το online Excel.")
-                    cell = row.cells.get("H")
-                    bc = cell.resolved(pkg.shared_strings) if cell else ""
-                    if normalize_barcode(bc) != normalize_barcode(op["barcode"]):
-                        raise Conflict("Το online Excel έχει διαφορετικό barcode στη γραμμή μεταφοράς.")
-                    fingerprint = row_fingerprint(row, pkg.shared_strings, FINGERPRINT_COLUMNS)
-                res = transfer_row(cur, nxt, source_sheet, target_sheet,
-                                   normalize_barcode(op["barcode"]), fingerprint, mode=op["mode"])
-            except (Conflict, ServiceError):
-                raise
-            except TransferError as exc:
-                raise Conflict("Η μεταφορά δεν μπορεί να επαναληφθεί στο online Excel: "
-                               + str(exc)) from exc
-            except Exception as exc:
-                log.warning("Outbox XML replay could not read Microsoft package: %s",
-                            type(exc).__name__)
-                raise ServiceError("Το Excel Online αποθηκεύτηκε με δομή που δεν μπορεί "
-                                   "να ενημερωθεί με ασφάλεια. Οι μεταφορές παραμένουν "
-                                   "στο Supabase, χωρίς αντικατάσταση.") from None
-            if (res.mode != op["mode"] or int(res.source_row) != int(op["source_row"])
-                    or int(res.target_row) != int(op["target_row"])):
-                raise Conflict("Η εκκρεμής μεταφορά θα άλλαζε διαφορετικές γραμμές. "
-                               "Δεν έγινε αντικατάσταση.")
-            cur, nxt = nxt, cur
-        candidate = cur.read_bytes()
+        try:
+            with WorkbookEditor(cur) as ed:
+                for op in pending:
+                    restore = op.get("kind") == "restore"
+                    move = Move(target_sheet if restore else source_sheet,
+                                source_sheet if restore else target_sheet,
+                                normalize_barcode(op["barcode"]), op["fingerprint"], mode=op["mode"],
+                                prefer_row=int(op["source_row"]), pick_last=restore)
+                    res = ed.move(move)
+                    if (res.mode != op["mode"] or int(res.source_row) != int(op["source_row"])
+                            or int(res.target_row) != int(op["target_row"])):
+                        raise Conflict("Η εκκρεμής μεταφορά θα άλλαζε διαφορετικές γραμμές. "
+                                       "Δεν έγινε αντικατάσταση.")
+                ed.finish(nxt)
+        except (Conflict, ServiceError):
+            raise
+        except TransferError as exc:
+            raise Conflict("Η μεταφορά δεν μπορεί να επαναληφθεί στο online Excel: " + str(exc)) from exc
+        except Exception as exc:
+            log.warning("Outbox XML replay could not read Microsoft package: %s", type(exc).__name__)
+            raise ServiceError("Το Excel Online αποθηκεύτηκε με δομή που δεν μπορεί "
+                               "να ενημερωθεί με ασφάλεια. Οι μεταφορές παραμένουν "
+                               "στο Supabase, χωρίς αντικατάσταση.") from None
+        candidate = nxt.read_bytes()
     if not _same_cells(candidate, expected):
         raise Conflict("Το αποτέλεσμα των εκκρεμών μεταφορών δεν συμφωνεί "
                        "με το ενημερωμένο Excel στο Supabase. Δεν έγινε αντικατάσταση.")
@@ -155,6 +174,7 @@ def _adopt(imp: dict, b: dict, online: bytes, meta: dict, record: dict,
     new_binding = dict(b)
     new_binding["synced_version"] = version
     new_binding["etag"] = meta["eTag"]
+    new_binding["synced_at"] = utcnow_iso()
     with transaction(lock="scans") as db:
         row = db.execute(
             "UPDATE excel_imports SET working_version=?,working_object=?,working_sha256=? "
@@ -176,6 +196,7 @@ def _adopt(imp: dict, b: dict, online: bytes, meta: dict, record: dict,
         db.execute("UPDATE app_settings SET value=? WHERE key=?",
                    (json.dumps(new_binding, ensure_ascii=False), onedrive.BOUND_KEY))
         db.execute("DELETE FROM app_settings WHERE key=?", (QUEUE_JOURNAL,))
+        db.execute("DELETE FROM app_settings WHERE key=?", (onedrive.ERROR_KEY,))
         # Legacy one-operation reconciliation journal, if any, is superseded.
         db.execute("DELETE FROM app_settings WHERE key=?", ("onedrive.reconciliation",))
         audit(db, actor, "onedrive.outbox_synced", {
@@ -227,7 +248,7 @@ def flush_under_lease(actor: str = "onedrive-mirror") -> dict:
               "op_ids": [o["id"] for o in ops], "backup_obj": backup_obj,
               "candidate_obj": candidate_obj, "remote_etag": meta["eTag"]}
     _save_journal(record)
-    if prefix != len(ops):
+    if prefix != len(_groups(ops)):
         # Uses If-Match so a concurrent cloud edit is rejected, not overwritten.
         from app.services.onedrive_reconcile import _publish
         _publish(b["drive_id"], b["item_id"], meta["eTag"], candidate, token)

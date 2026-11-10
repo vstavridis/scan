@@ -409,6 +409,309 @@ def _count_fp(xml_bytes: bytes, shared: list[str], barcode_norm: str, fingerprin
     return same, total
 
 
+@dataclass
+class Move:
+    """Μία μετακίνηση γραμμής: από `from_sheet` (αφαίρεση) προς το τέλος του `to_sheet` (προσθήκη).
+
+    Μεταφορά: «΄Ετοιμα προϊόντα» -> «Σβησμενα ». Επαναφορά: αντίστροφα.
+    prefer_row: η αναμενόμενη γραμμή της πηγής (επαληθεύεται με barcode + fingerprint).
+    pick_last: αν υπάρχουν πανομοιότυπες γραμμές, επιλέγεται η τελευταία (π.χ. επαναφορά πρόσφατης
+    μεταφοράς από τα Σβησμένα, όπου μπορεί να υπάρχουν παλιές ίδιες εγγραφές).
+    """
+    from_sheet: str
+    to_sheet: str
+    barcode_norm: str
+    fingerprint: str
+    mode: str = "auto"
+    prefer_row: int | None = None
+    pick_last: bool = False
+
+
+_FULL_COUNT_LIMIT = 4_000_000  # μέχρι αυτό το μέγεθος XML γίνεται πλήρης καταμέτρηση πριν/μετά
+
+
+class WorkbookEditor:
+    """Εφαρμόζει διαδοχικές μετακινήσεις γραμμών στη μνήμη και γράφει το αρχείο ΜΙΑ φορά.
+
+    Κάθε μετακίνηση είναι ατομική: αν αποτύχει, η κατάσταση επιστρέφει όπως ήταν πριν από αυτήν
+    (οι προηγούμενες μένουν). Όλα τα υπόλοιπα parts του πακέτου αντιγράφονται αυτούσια.
+    """
+
+    def __init__(self, src_path: Path):
+        self.src_path = Path(src_path)
+        self.pkg = XlsxPackage(self.src_path)
+        self.shared = self.pkg.shared_strings
+        self.docs: dict[str, _SheetDoc] = {}
+        self.full_check: set[str] = set()      # parts με δομική αλλαγή -> πλήρης έλεγχος XML στο τέλος
+        self.foreign: dict[str, str] = {}      # άλλα parts με ξαναγραμμένους τύπους
+        self.workbook_xml = self.pkg.read("xl/workbook.xml").decode("utf-8")
+        self._workbook_original = self.workbook_xml
+        self.results: list[TransferResult] = []
+
+    # -- βοηθητικά ------------------------------------------------------------
+    def close(self) -> None:
+        self.pkg.close()
+
+    def __enter__(self) -> "WorkbookEditor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _part(self, sheet: str) -> str:
+        if sheet not in self.pkg.sheets:
+            raise UnsupportedStructureError(f"Δεν βρέθηκε το φύλλο {sheet!r} στο Excel.")
+        return self.pkg.sheets[sheet]
+
+    def _doc(self, part: str, label: str) -> _SheetDoc:
+        if part not in self.docs:
+            self.docs[part] = _SheetDoc.parse(self.pkg.read(part).decode("utf-8"), label)
+        return self.docs[part]
+
+    def _current_xml(self, part: str) -> str:
+        if part in self.docs:
+            return self.docs[part].render()
+        if part in self.foreign:
+            return self.foreign[part]
+        return self.pkg.read(part).decode("utf-8")
+
+    def _row_obj(self, doc: _SheetDoc, row_xml: str):
+        return _parse_row_fragment(doc.head, row_xml)
+
+    def _row_matches(self, doc: _SheetDoc, row_xml: str, barcode_norm: str, fingerprint: str) -> bool:
+        row = self._row_obj(doc, row_xml)
+        cell = row.cells.get(BARCODE_COL)
+        val = cell.resolved(self.shared) if cell is not None else None
+        return (val is not None and normalize_barcode(val) == barcode_norm
+                and row_fingerprint(row, self.shared, FINGERPRINT_COLUMNS) == fingerprint)
+
+    def _locate(self, doc: _SheetDoc, m: Move) -> int:
+        """Index της γραμμής στο doc.rows (επαλήθευση με barcode + fingerprint)."""
+        if m.prefer_row is not None:
+            for i, r in enumerate(doc.rows):
+                if _row_number(r) == m.prefer_row:
+                    if _row_has_content(r) and self._row_matches(doc, r, m.barcode_norm, m.fingerprint):
+                        return i
+                    break
+        by_barcode: list[tuple[int, str]] = []
+        for row in iter_sheet_rows(doc.render().encode("utf-8")):
+            if row.number == 1:
+                continue
+            cell = row.cells.get(BARCODE_COL)
+            val = cell.resolved(self.shared) if cell is not None else None
+            if val is None or normalize_barcode(val) != m.barcode_norm:
+                continue
+            by_barcode.append((row.number, row_fingerprint(row, self.shared, FINGERPRINT_COLUMNS)))
+        matches = [r for r, fp in by_barcode if fp == m.fingerprint]
+        if not matches:
+            if by_barcode:
+                raise RowNotFoundError(
+                    "Η γραμμή του barcode στο Excel έχει αλλάξει από την εισαγωγή (διαφορετικά στοιχεία). "
+                    "Η ενέργεια ακυρώθηκε για ασφάλεια."
+                )
+            raise RowNotFoundError(f"Το barcode δεν βρέθηκε στο φύλλο «{m.from_sheet.strip()}».")
+        if len(matches) > 1 and not m.pick_last:
+            raise RowAmbiguousError(
+                f"Βρέθηκαν {len(matches)} πανομοιότυπες γραμμές για το barcode (γραμμές {matches}). "
+                "Απαιτείται χειροκίνητος έλεγχος στο Excel."
+            )
+        row_num = max(matches)
+        idx = next((i for i, r in enumerate(doc.rows) if _row_number(r) == row_num), None)
+        if idx is None:
+            raise RowNotFoundError("Η γραμμή δεν βρέθηκε στο XML του φύλλου.")
+        return idx
+
+    # -- μία μετακίνηση --------------------------------------------------------
+    def move(self, m: Move) -> TransferResult:
+        if m.mode not in ("auto", "shift", "clear"):
+            raise ValueError(m.mode)
+        if m.from_sheet == m.to_sheet:
+            raise ValueError("ίδιο φύλλο")
+        src_part, tgt_part = self._part(m.from_sheet), self._part(m.to_sheet)
+        src_doc = self._doc(src_part, repr(m.from_sheet))
+        tgt_doc = self._doc(tgt_part, repr(m.to_sheet))
+        snapshot = (
+            {p: (d.head, list(d.rows), d.tail) for p, d in self.docs.items()},
+            dict(self.foreign), self.workbook_xml, set(self.full_check),
+        )
+        try:
+            result = self._move(m, src_part, tgt_part, src_doc, tgt_doc)
+        except BaseException:
+            docs, self.foreign, self.workbook_xml, self.full_check = snapshot
+            for p, (head, rows, tail) in docs.items():
+                self.docs[p].head, self.docs[p].rows, self.docs[p].tail = head, rows, tail
+            raise
+        self.results.append(result)
+        return result
+
+    def _move(self, m: Move, src_part: str, tgt_part: str, src_doc: _SheetDoc, tgt_doc: _SheetDoc) -> TransferResult:
+        small_src = sum(len(r) for r in src_doc.rows) < _FULL_COUNT_LIMIT
+        src_before = _count_fp(src_doc.render().encode("utf-8"), self.shared, m.barcode_norm, m.fingerprint) \
+            if small_src else None
+        src_idx = self._locate(src_doc, m)
+        source_row_xml = src_doc.rows[src_idx]
+        src_row_num = _row_number(source_row_xml)
+
+        # 1) νέα γραμμή στο τέλος των δεδομένων του προορισμού
+        ins_idx, new_num, replaces_empty = _target_insert(tgt_doc)
+        template_tag = _row_open_tag(tgt_doc.rows[ins_idx]) if replaces_empty else _row_open_tag(tgt_doc.rows[ins_idx - 1])
+        new_row_xml = _build_target_row(source_row_xml, src_row_num, new_num, template_tag)
+        if replaces_empty:
+            tgt_doc.rows[ins_idx] = new_row_xml
+        else:
+            tgt_doc.rows.insert(ins_idx, new_row_xml)
+
+        def grow(ref: str) -> str:
+            mm = re.match(r"^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$", ref)
+            if not mm:
+                return ref
+            if mm.group(3):
+                return f"{mm.group(1)}{mm.group(2)}:{mm.group(3)}{max(int(mm.group(4)), new_num)}"
+            return f"{mm.group(1)}{mm.group(2)}:{mm.group(1)}{max(int(mm.group(2)), new_num)}"
+
+        tgt_doc.head = _update_dimension(tgt_doc.head, grow)
+        warnings: list[str] = []
+
+        # 2) αφαίρεση από την πηγή
+        chosen = m.mode
+        if m.mode in ("auto", "shift"):
+            src_snapshot = (src_doc.head, list(src_doc.rows), src_doc.tail)
+            foreign_before = dict(self.foreign)
+            wb_before = self.workbook_xml
+            full_before = set(self.full_check)
+            try:
+                reasons = _sheet_check_for_shift(src_doc.head + src_doc.tail)
+                if reasons:
+                    raise FormulaShiftError("Το φύλλο πηγής περιέχει: " + ", ".join(reasons))
+                for part in self._foreign_parts(src_part, m.from_sheet):
+                    if part.startswith(("xl/charts/", "xl/pivotCache/", "xl/pivotTables/", "xl/tables/")):
+                        raise FormulaShiftError(f"Το {part} αναφέρεται στο φύλλο πηγής.")
+                    if part in self.docs:
+                        # Φύλλο που ήδη επεξεργαζόμαστε: μόνο οι γραμμές που αναφέρουν το φύλλο πηγής.
+                        doc = self.docs[part]
+                        for i, row_xml in enumerate(doc.rows):
+                            if _mentions(row_xml.encode("utf-8"), m.from_sheet):
+                                new_row = _rewrite_foreign_formulas(row_xml, m.from_sheet, src_row_num)
+                                if new_row != row_xml:
+                                    doc.rows[i] = new_row
+                                    self.full_check.add(part)
+                        continue
+                    base = self._current_xml(part)
+                    new_xml = _rewrite_foreign_formulas(base, m.from_sheet, src_row_num)
+                    if new_xml != base:
+                        self.foreign[part] = new_xml
+                        self.full_check.add(part)
+                self.workbook_xml = _rewrite_defined_names(self.workbook_xml, m.from_sheet, src_row_num)
+                _apply_shift(src_doc, src_idx, src_row_num, m.from_sheet)
+                self.full_check.add(src_part)
+                chosen = "shift"
+            except FormulaShiftError as exc:
+                if m.mode == "shift":
+                    raise UnsupportedStructureError(f"Η φυσική αφαίρεση γραμμής δεν είναι ασφαλής: {exc}") from exc
+                src_doc.head, src_doc.rows, src_doc.tail = src_snapshot
+                self.foreign, self.workbook_xml, self.full_check = foreign_before, wb_before, full_before
+                _apply_clear(src_doc, src_idx)
+                chosen = "clear"
+                warnings.append(
+                    "Η γραμμή δεν διαγράφηκε φυσικά από το φύλλο πηγής γιατί αυτό δεν ήταν ασφαλές "
+                    f"({exc}). Αντιγράφηκε στο φύλλο προορισμού και η αρχική γραμμή {src_row_num} "
+                    "καθαρίστηκε (έμεινε κενή, με τη μορφοποίησή της)."
+                )
+        else:
+            _apply_clear(src_doc, src_idx)
+
+        # 3) επαλήθευση της μετακίνησης
+        if src_before is not None:
+            src_after = _count_fp(src_doc.render().encode("utf-8"), self.shared, m.barcode_norm, m.fingerprint)
+            if src_after != (src_before[0] - 1, src_before[1] - 1):
+                raise UnsupportedStructureError("Επαλήθευση απέτυχε: η γραμμή δεν αφαιρέθηκε σωστά από την πηγή.")
+        elif chosen == "clear":
+            cleared = src_doc.rows[src_idx]
+            if _row_has_content(cleared) or _row_number(cleared) != src_row_num:
+                raise UnsupportedStructureError("Επαλήθευση απέτυχε: η γραμμή της πηγής δεν καθαρίστηκε.")
+            self._row_obj(src_doc, cleared)  # έγκυρο XML
+        else:
+            self.full_check.add(src_part)
+        new_row = self._row_obj(tgt_doc, new_row_xml)
+        bc_cell = new_row.cells.get(BARCODE_COL)
+        bc_val = bc_cell.resolved(self.shared) if bc_cell is not None else None
+        if (new_row.number != new_num or bc_val is None or normalize_barcode(bc_val) != m.barcode_norm
+                or row_fingerprint(new_row, self.shared, FINGERPRINT_COLUMNS) != m.fingerprint):
+            raise UnsupportedStructureError("Επαλήθευση απέτυχε: η γραμμή δεν αντιγράφηκε σωστά στον προορισμό.")
+        if sum(1 for r in tgt_doc.rows if _row_number(r) == new_num) != 1:
+            raise UnsupportedStructureError("Επαλήθευση απέτυχε: διπλός αριθμός γραμμής στον προορισμό.")
+        log.info("Move prepared: %s row %s -> %s row %s (%s)", m.from_sheet, src_row_num, m.to_sheet, new_num, chosen)
+        return TransferResult(mode=chosen, source_row=src_row_num, target_row=new_num, warnings=warnings)
+
+    def _foreign_parts(self, source_part: str, sheet_name: str) -> list[str]:
+        key = (source_part, sheet_name)
+        cache = self.__dict__.setdefault("_foreign_cache", {})
+        if key in cache:
+            return cache[key]
+        hits = []
+        for name in self.pkg.names:
+            if name in (source_part, "xl/workbook.xml", "xl/sharedStrings.xml", "docProps/app.xml"):
+                continue
+            if not name.endswith(".xml"):
+                continue
+            if name.startswith(("xl/worksheets/", "xl/charts/", "xl/pivotCache/", "xl/pivotTables/", "xl/tables/")):
+                # Οι γραμμές που προστίθενται είναι αντίγραφα γραμμών του workbook: ο έλεγχος στο
+                # αρχικό περιεχόμενο αρκεί (cache ανά φύλλο πηγής για τις μαζικές μετακινήσεις).
+                if _mentions(self.pkg.read(name), sheet_name) or (
+                        name in self.foreign and _mentions(self.foreign[name].encode("utf-8"), sheet_name)):
+                    hits.append(name)
+        cache[key] = hits
+        return hits
+
+    # -- εγγραφή ---------------------------------------------------------------
+    def finish(self, out_path: Path) -> list[str]:
+        """Γράφει το νέο workbook (μία φορά) και επαληθεύει ότι ανοίγει. Επιστρέφει τα αλλαγμένα parts."""
+        parts: dict[str, bytes] = {}
+        for part, doc in self.docs.items():
+            xml = doc.render()
+            if xml.encode("utf-8") != self.pkg.read(part):
+                parts[part] = xml.encode("utf-8")
+        for part, xml in self.foreign.items():
+            parts[part] = xml.encode("utf-8")
+        if self.workbook_xml != self._workbook_original:
+            parts["xl/workbook.xml"] = self.workbook_xml.encode("utf-8")
+        for part, data in parts.items():
+            # Φύλλα όπου μόνο προστέθηκαν/καθαρίστηκαν γραμμές έχουν ήδη ελεγχθεί γραμμή-γραμμή.
+            if part in self.docs and part not in self.full_check:
+                continue
+            try:
+                ET.fromstring(data)
+            except ET.ParseError as exc:
+                raise UnsupportedStructureError(f"Εσωτερικό σφάλμα: μη έγκυρο XML στο {part}: {exc}") from exc
+        removed = _remove_calc_chain(parts, self.pkg) if parts else set()
+        _write_zip(self.pkg, Path(out_path), parts, removed)
+        with XlsxPackage(out_path) as check:
+            if set(check.sheets) != set(self.pkg.sheets):
+                raise UnsupportedStructureError("Επαλήθευση απέτυχε: χάθηκαν φύλλα.")
+            _ = check.shared_strings
+        return sorted(parts) + [f"-{p}" for p in sorted(removed)]
+
+
+def apply_moves(src_path: Path, out_path: Path, moves: list[Move], stop_on_error: bool = True
+                ) -> list[TransferResult | TransferError]:
+    """Εφαρμόζει πολλές μετακινήσεις με τη σειρά και γράφει το out_path μία φορά.
+
+    stop_on_error=False: μια μετακίνηση που αποτυγχάνει παραλείπεται (επιστρέφεται το σφάλμα της)
+    και οι υπόλοιπες συνεχίζουν. Το src_path ΔΕΝ αλλάζει ποτέ.
+    """
+    out: list[TransferResult | TransferError] = []
+    with WorkbookEditor(src_path) as ed:
+        for m in moves:
+            try:
+                out.append(ed.move(m))
+            except TransferError as exc:
+                if stop_on_error:
+                    raise
+                out.append(exc)
+        ed.finish(out_path)
+    return out
+
+
 def transfer_row(
     src_path: Path,
     out_path: Path,
@@ -421,134 +724,9 @@ def transfer_row(
     """Γράφει στο out_path νέο workbook με τη γραμμή μεταφερμένη. Το src_path ΔΕΝ αλλάζει."""
     if mode not in ("auto", "shift", "clear"):
         raise ValueError(mode)
-    with XlsxPackage(src_path) as pkg:
-        if source_sheet not in pkg.sheets or target_sheet not in pkg.sheets:
+    with WorkbookEditor(src_path) as ed:
+        if source_sheet not in ed.pkg.sheets or target_sheet not in ed.pkg.sheets:
             raise UnsupportedStructureError("Δεν βρέθηκαν τα φύλλα πηγής/προορισμού στο ενεργό Excel.")
-        src_part, tgt_part = pkg.sheets[source_sheet], pkg.sheets[target_sheet]
-        shared = pkg.shared_strings
-
-        src_row_num = _locate_row(pkg, source_sheet, barcode_norm, fingerprint)
-        src_xml_original = pkg.read(src_part)
-        tgt_xml_original = pkg.read(tgt_part)
-        src_before = _count_fp(src_xml_original, shared, barcode_norm, fingerprint)
-
-        src_doc = _SheetDoc.parse(src_xml_original.decode("utf-8"), repr(source_sheet))
-        tgt_doc = _SheetDoc.parse(tgt_xml_original.decode("utf-8"), repr(target_sheet))
-        src_idx = next((i for i, r in enumerate(src_doc.rows) if _row_number(r) == src_row_num), None)
-        if src_idx is None:
-            raise RowNotFoundError("Η γραμμή δεν βρέθηκε στο XML του φύλλου.")
-        source_row_xml = src_doc.rows[src_idx]
-
-        # 1) νέα γραμμή στον προορισμό
-        ins_idx, new_num, replaces_empty = _target_insert(tgt_doc)
-        template_tag = _row_open_tag(tgt_doc.rows[ins_idx]) if replaces_empty else _row_open_tag(tgt_doc.rows[ins_idx - 1])
-        new_row_xml = _build_target_row(source_row_xml, src_row_num, new_num, template_tag)
-        if replaces_empty:
-            tgt_doc.rows[ins_idx] = new_row_xml
-        else:
-            tgt_doc.rows.insert(ins_idx, new_row_xml)
-
-        def grow(ref: str) -> str:
-            m = re.match(r"^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$", ref)
-            if not m:
-                return ref
-            if m.group(3):
-                end_row = max(int(m.group(4)), new_num)
-                return f"{m.group(1)}{m.group(2)}:{m.group(3)}{end_row}"
-            return f"{m.group(1)}{m.group(2)}:{m.group(1)}{max(int(m.group(2)), new_num)}"
-
-        tgt_doc.head = _update_dimension(tgt_doc.head, grow)
-
-        parts: dict[str, bytes] = {}
-        warnings: list[str] = []
-
-        # 2) αφαίρεση από την πηγή
-        chosen = mode
-        foreign_parts: dict[str, str] = {}
-        workbook_xml_new: str | None = None
-        if mode in ("auto", "shift"):
-            reasons = _sheet_check_for_shift(src_xml_original.decode("utf-8"))
-            try:
-                if reasons:
-                    raise FormulaShiftError("Το φύλλο πηγής περιέχει: " + ", ".join(reasons))
-                foreign = _external_references(pkg, src_part, tgt_part, source_sheet)
-                for part in foreign:
-                    if part.startswith(("xl/charts/", "xl/pivotCache/", "xl/pivotTables/", "xl/tables/")):
-                        raise FormulaShiftError(f"Το {part} αναφέρεται στο φύλλο πηγής.")
-                    base = tgt_doc.render() if part == tgt_part else pkg.read(part).decode("utf-8")
-                    new_xml = _rewrite_foreign_formulas(base, source_sheet, src_row_num)
-                    if new_xml != base:
-                        foreign_parts[part] = new_xml
-                wb_xml = pkg.read("xl/workbook.xml").decode("utf-8")
-                workbook_xml_new = _rewrite_defined_names(wb_xml, source_sheet, src_row_num)
-                _apply_shift(src_doc, src_idx, src_row_num, source_sheet)
-                chosen = "shift"
-            except FormulaShiftError as exc:
-                if mode == "shift":
-                    raise UnsupportedStructureError(f"Η φυσική αφαίρεση γραμμής δεν είναι ασφαλής: {exc}") from exc
-                # επαναφορά από την αρχή για το clear
-                src_doc = _SheetDoc.parse(src_xml_original.decode("utf-8"), repr(source_sheet))
-                foreign_parts = {}
-                workbook_xml_new = None
-                _apply_clear(src_doc, src_idx)
-                chosen = "clear"
-                warnings.append(
-                    "Η γραμμή δεν διαγράφηκε φυσικά από το φύλλο πηγής γιατί αυτό δεν ήταν ασφαλές "
-                    f"({exc}). Αντιγράφηκε στο φύλλο προορισμού και η αρχική γραμμή {src_row_num} "
-                    "καθαρίστηκε (έμεινε κενή, με τη μορφοποίησή της)."
-                )
-        else:
-            _apply_clear(src_doc, src_idx)
-
-        src_new = src_doc.render()
-        rewritten_foreign = set(foreign_parts)
-        tgt_new = foreign_parts.pop(tgt_part, None) or tgt_doc.render()
-        parts[src_part] = src_new.encode("utf-8")
-        parts[tgt_part] = tgt_new.encode("utf-8")
-        for part, xml in foreign_parts.items():
-            parts[part] = xml.encode("utf-8")
-        if workbook_xml_new is not None and workbook_xml_new != pkg.read("xl/workbook.xml").decode("utf-8"):
-            parts["xl/workbook.xml"] = workbook_xml_new.encode("utf-8")
-
-        # 3) επαλήθευση πριν την εγγραφή: well-formed XML + σωστές μετρήσεις.
-        # Το φύλλο προορισμού αλλάζει μόνο στη νέα γραμμή και στο <dimension> (εκτός αν
-        # ξαναγράφτηκαν τύποι του)· ελέγχεται πλήρως μόνο σε εκείνη την περίπτωση.
-        for part, data in parts.items():
-            if part == tgt_part and tgt_part not in rewritten_foreign:
-                continue
-            try:
-                ET.fromstring(data)
-            except ET.ParseError as exc:
-                raise UnsupportedStructureError(f"Εσωτερικό σφάλμα: μη έγκυρο XML στο {part}: {exc}") from exc
-        src_after = _count_fp(parts[src_part], shared, barcode_norm, fingerprint)
-        if src_after != (src_before[0] - 1, src_before[1] - 1):
-            raise UnsupportedStructureError("Επαλήθευση απέτυχε: η γραμμή δεν αφαιρέθηκε σωστά από την πηγή.")
-        new_row = _parse_row_fragment(tgt_doc.head, new_row_xml)
-        bc_cell = new_row.cells.get(BARCODE_COL)
-        bc_val = bc_cell.resolved(shared) if bc_cell is not None else None
-        if (
-            new_row.number != new_num
-            or bc_val is None
-            or normalize_barcode(bc_val) != barcode_norm
-            or row_fingerprint(new_row, shared, FINGERPRINT_COLUMNS) != fingerprint
-        ):
-            raise UnsupportedStructureError("Επαλήθευση απέτυχε: η γραμμή δεν αντιγράφηκε σωστά στον προορισμό.")
-        if f'r="{new_num}"' in tgt_new.replace(new_row_xml, "", 1).split("</sheetData>")[0][len(tgt_doc.head):]:
-            raise UnsupportedStructureError("Επαλήθευση απέτυχε: διπλός αριθμός γραμμής στον προορισμό.")
-
-        removed = _remove_calc_chain(parts, pkg)
-        _write_zip(pkg, out_path, parts, removed)
-
-    # 4) το νέο αρχείο πρέπει να ανοίγει ξανά κανονικά
-    with XlsxPackage(out_path) as check:
-        if source_sheet not in check.sheets or target_sheet not in check.sheets:
-            raise UnsupportedStructureError("Επαλήθευση απέτυχε: χάθηκαν φύλλα.")
-        _ = check.shared_strings
-    log.info("Transfer prepared: %s row %s -> %s row %s (%s)", source_sheet, src_row_num, target_sheet, new_num, chosen)
-    return TransferResult(
-        mode=chosen,
-        source_row=src_row_num,
-        target_row=new_num,
-        warnings=warnings,
-        modified_parts=sorted(parts) + [f"-{p}" for p in sorted(removed)],
-    )
+        res = ed.move(Move(source_sheet, target_sheet, barcode_norm, fingerprint, mode=mode))
+        res.modified_parts = ed.finish(out_path)
+    return res
