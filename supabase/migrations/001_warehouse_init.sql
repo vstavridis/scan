@@ -160,8 +160,8 @@ CREATE TABLE IF NOT EXISTS transfer_operations (
     warning            TEXT,
     error              TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_transfer_once ON transfer_operations(product_record_id)
-    WHERE status IN ('started', 'completed');
+-- (Το παλιό index v2 «ux_transfer_once» ΔΕΝ δημιουργείται πια: μετά από επαναφορά υπάρχουν δύο
+--  ολοκληρωμένες ενέργειες για το ίδιο προϊόν. Τη μοναδικότητα την εξασφαλίζει το ux_transfer_active.)
 
 -- Leases για ενέργειες που διαρκούν πέρα από ένα DB transaction (εγγραφή Excel).
 CREATE TABLE IF NOT EXISTS app_locks (

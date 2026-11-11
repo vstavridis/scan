@@ -275,3 +275,24 @@ def test_schema_upgrade_from_v2_keeps_transfers():
             with pytest.raises(psycopg.errors.CheckViolation):
                 c.execute("INSERT INTO transfer_operations(product_record_id, import_id, barcode, fingerprint, status, kind, "
                           "requested_by, started_at) VALUES (3, 1, 'VS3', 'f', 'queued', 'other', 'x', '2026-01-01')")
+
+
+def test_startup_after_restore_and_retransfer(app_env, synthetic_master, tmp_path):
+    """Regression: μετά από επαναφορά + νέα μεταφορά του ίδιου προϊόντος, η επανεκκίνηση
+    (ξανά εφαρμογή του σχήματος) δεν πρέπει να αποτυγχάνει με UniqueViolation."""
+    from app.db import database
+    activate_workbook(synthetic_master)
+    scan(login("scanner"), "VS11486")
+    sec = login("secretary")
+    backend.transfer_item(sec, _item_id("VS11486"))
+    backend.restore_transfer(sec, backend.list_transfers(sec)[0]["id"], wait=True)
+    backend.transfer_item(sec, _item_id("VS11486"))
+    for _ in range(2):                                   # δύο "reboot"
+        database.reset_init_cache()
+        database.init_db()
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) AS n FROM transfer_operations WHERE product_record_id="
+                         "(SELECT product_record_id FROM transfer_operations LIMIT 1) "
+                         "AND status='completed'").fetchone()["n"]
+    assert n == 3                                        # μεταφορά, επαναφορά, νέα μεταφορά
+    assert backend.dashboard(sec)["items"] == []         # η εφαρμογή λειτουργεί κανονικά
