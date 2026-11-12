@@ -98,6 +98,9 @@ div[data-testid="stDataFrame"] { border: 1px solid var(--wh-line); border-radius
 .total-line { font-size: 1.35rem; font-weight: 800; margin-top: .4rem; color: var(--wh-ink); }
 /* Χωρίς "θάμπωμα" κατά τις περιοδικές ανανεώσεις (st.fragment run_every) */
 [data-stale="true"] { opacity: 1 !important; transition: none !important; }
+/* Χωρίς το «Running… / Stop» πάνω δεξιά σε κάθε περιοδική ανανέωση (Scanner/Dashboard/Ιστορικό).
+   Οι πραγματικές ενέργειες δείχνουν δικά τους μηνύματα/spinners. */
+[data-testid="stStatusWidget"] { visibility: hidden !important; }
 </style>
 """
 

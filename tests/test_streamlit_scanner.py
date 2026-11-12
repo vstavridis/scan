@@ -491,3 +491,24 @@ def test_bulk_transfer_correction_remove_and_restore(browser, tmp_path, syntheti
         page.screenshot(path=str(tmp_path / "history.png"), full_page=True)
         assert not errors, errors
         ctx.close()
+
+
+def test_periodic_refresh_does_not_show_running_indicator(browser, tmp_path, synthetic_master):
+    """Το «Running… / Stop» του Streamlit (data-testid=stStatusWidget, εμφανίζεται όταν μια ανανέωση
+    κρατά > 0,5 δευτ., π.χ. στο Cloud) είναι κρυφό σε όλες τις σελίδες."""
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        for link, marker in (("Dashboard", "text=Dashboard — Ζωντανή εικόνα"), ("Scanner", ".whs-root"),
+                             ("Ιστορικό", "text=Μεταφορές & Επαναφορά")):
+            page.get_by_role("link", name=link).click()
+            page.wait_for_selector(marker, timeout=30000)
+            vis = page.evaluate("""() => { const h = document.querySelector('[data-testid="stHeader"]') || document.body;
+                const w = document.createElement('div'); w.setAttribute('data-testid', 'stStatusWidget');
+                w.className = 'stStatusWidget'; w.textContent = 'Stop'; h.appendChild(w);
+                const v = getComputedStyle(w).visibility; w.remove(); return v; }""")
+            assert vis == "hidden", link
+        ctx.close()
