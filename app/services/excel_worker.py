@@ -17,12 +17,14 @@ import time
 log = logging.getLogger(__name__)
 
 IDLE_SECONDS = 5.0
-ONEDRIVE_RETRY_SECONDS = 60.0
+ONEDRIVE_RETRY_SECONDS = 60.0      # πρώτη αυτόματη επανάληψη OneDrive
+ONEDRIVE_MAX_RETRY_SECONDS = 600.0 # μετά από συνεχόμενες αποτυχίες: έως κάθε 10 λεπτά
 
 _event = threading.Event()
 _thread: threading.Thread | None = None
 _start_lock = threading.Lock()
 _last_onedrive = 0.0
+_onedrive_delay = ONEDRIVE_RETRY_SECONDS
 _stop = threading.Event()
 
 
@@ -59,7 +61,7 @@ def stop(timeout: float = 10.0) -> None:
 
 def run_once() -> dict:
     """Ένας γύρος: ουρά Excel και (αν χρειάζεται) OneDrive. Χρησιμοποιείται και από τα tests."""
-    global _last_onedrive
+    global _last_onedrive, _onedrive_delay
     from app.services import transfer
     from app.services.errors import Conflict, ServiceError
 
@@ -79,11 +81,14 @@ def run_once() -> dict:
             break
     try:
         from app.services import onedrive
-        due = time.monotonic() - _last_onedrive > ONEDRIVE_RETRY_SECONDS
+        due = time.monotonic() - _last_onedrive > _onedrive_delay
         if (changed or due) and onedrive.status().get("pending"):
             _last_onedrive = time.monotonic()
             synced, _warning = transfer._onedrive_mirror("onedrive-mirror")
             out["onedrive"] = synced
+            # Αν το αρχείο μένει κλειδωμένο (ανοιχτό στο Excel Online), αραιώνουν οι προσπάθειες.
+            _onedrive_delay = (ONEDRIVE_RETRY_SECONDS if synced
+                               else min(_onedrive_delay * 2, ONEDRIVE_MAX_RETRY_SECONDS))
     except Exception as exc:  # το OneDrive δεν σταματά ποτέ τον worker
         log.warning("OneDrive mirror check failed (%s)", type(exc).__name__)
     return out

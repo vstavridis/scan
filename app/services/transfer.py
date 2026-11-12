@@ -402,6 +402,7 @@ def _onedrive_mirror(actor: str) -> tuple[bool, str | None]:
         try:
             with transaction() as conn:
                 _set_setting(conn, onedrive.ERROR_KEY, {"at": utcnow_iso(), "error": str(reason)[:500]})
+                bump_version(conn)  # το Dashboard δείχνει αμέσως την αιτία
         except Exception:
             pass
         return False, ("Η μεταφορά ολοκληρώθηκε στο Supabase, αλλά το online OneDrive δεν έχει ενημερωθεί ακόμη. "

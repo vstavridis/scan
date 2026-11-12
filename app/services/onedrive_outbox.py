@@ -238,16 +238,25 @@ def flush_under_lease(actor: str = "onedrive-mirror") -> dict:
             and prior["op_ids"] == [o["id"] for o in ops]
             and _same_cells(remote, get_store().get(prior["candidate_obj"]))):
         return _adopt(imp, b, remote, meta, prior, actor)
-    backup_obj = f"backups/onedrive_before_sync_{uuid.uuid4().hex}.xlsx"
-    candidate_obj = (f"imports/{int(imp['id']):05d}/working/"
-                     f"outbox_{uuid.uuid4().hex}.xlsx")
-    store = get_store()
-    store.put_verified(backup_obj, remote)
-    store.put_verified(candidate_obj, candidate)
-    record = {"import_id": imp["id"], "target_sha": imp["working_sha256"],
-              "op_ids": [o["id"] for o in ops], "backup_obj": backup_obj,
-              "candidate_obj": candidate_obj, "remote_etag": meta["eTag"]}
-    _save_journal(record)
+    if (prior and prior["target_sha"] == imp["working_sha256"]
+            and prior["op_ids"] == [o["id"] for o in ops]
+            and prior.get("remote_etag") == meta["eTag"]
+            and prior.get("candidate_sha") == sha256_bytes(candidate)):
+        # Ίδια προσπάθεια με την προηγούμενη (π.χ. το αρχείο είναι ακόμη ανοιχτό στο Excel Online):
+        # τα αντίγραφα υπάρχουν ήδη, δεν ανεβαίνουν ξανά σε κάθε αυτόματη επανάληψη.
+        record = prior
+    else:
+        backup_obj = f"backups/onedrive_before_sync_{uuid.uuid4().hex}.xlsx"
+        candidate_obj = (f"imports/{int(imp['id']):05d}/working/"
+                         f"outbox_{uuid.uuid4().hex}.xlsx")
+        store = get_store()
+        store.put_verified(backup_obj, remote)
+        store.put_verified(candidate_obj, candidate)
+        record = {"import_id": imp["id"], "target_sha": imp["working_sha256"],
+                  "op_ids": [o["id"] for o in ops], "backup_obj": backup_obj,
+                  "candidate_obj": candidate_obj, "remote_etag": meta["eTag"],
+                  "candidate_sha": sha256_bytes(candidate)}
+        _save_journal(record)
     if prefix != len(_groups(ops)):
         # Uses If-Match so a concurrent cloud edit is rejected, not overwritten.
         from app.services.onedrive_reconcile import _publish

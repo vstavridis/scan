@@ -296,3 +296,43 @@ def test_startup_after_restore_and_retransfer(app_env, synthetic_master, tmp_pat
                          "AND status='completed'").fetchone()["n"]
     assert n == 3                                        # μεταφορά, επαναφορά, νέα μεταφορά
     assert backend.dashboard(sec)["items"] == []         # η εφαρμογή λειτουργεί κανονικά
+
+
+def test_onedrive_locked_retries_do_not_pile_up_backups(app_env, synthetic_master, monkeypatch):
+    """Αρχείο ανοιχτό στο Excel Online: οι αυτόματες επαναλήψεις δεν ανεβάζουν νέα αντίγραφα κάθε φορά,
+    και η αιτία εμφανίζεται στο Dashboard."""
+    from tests.test_onedrive_outbox import repack, setup_remote
+    cloud = setup_remote(app_env, synthetic_master, monkeypatch)
+    from app.storage import get_store
+    store = get_store()
+    uploads: list[str] = []
+    real_put = store.put_verified
+    monkeypatch.setattr(store, "put_verified", lambda path, data, *a, **k: (uploads.append(path),
+                                                                           real_put(path, data, *a, **k))[1])
+
+    def locked(*a):
+        raise Conflict("Microsoft 409: file is in use")
+
+    monkeypatch.setattr("app.services.onedrive_reconcile._publish", locked)
+    scan(login("scanner"), "VS11486")
+    sec = login("secretary")
+    backend.queue_transfers(sec, _ids("VS11486"))
+    excel_worker.run_once()
+    first = [u for u in uploads if "onedrive_before_sync" in u or "outbox_" in u]
+    assert len(first) == 2
+    for _ in range(3):
+        synced, warning = transfer_service._onedrive_mirror("onedrive-mirror")
+        assert synced is False and warning
+    again = [u for u in uploads if "onedrive_before_sync" in u or "outbox_" in u]
+    assert again == first                                   # κανένα νέο αντίγραφο στις επαναλήψεις
+    snap = backend.dashboard_if_changed(sec, None)
+    assert snap["onedrive_pending"] and "409" in snap["sync"]["onedrive_last_error"]["error"]
+
+    def publish(drive, item, etag, candidate, token):
+        cloud["data"], cloud["etag"] = repack(candidate), "after-upload"
+
+    monkeypatch.setattr("app.services.onedrive_reconcile._publish", publish)
+    synced, _ = transfer_service._onedrive_mirror("onedrive-mirror")
+    assert synced is True and onedrive.status()["pending"] is False
+    snap = backend.dashboard_if_changed(sec, None)
+    assert not snap["onedrive_pending"] and snap["sync"]["onedrive_last_error"] is None
