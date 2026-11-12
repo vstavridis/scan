@@ -151,6 +151,61 @@ def _replay(remote: bytes, ops: list[dict], prefix: int, expected: bytes,
     return candidate
 
 
+def _merge(remote: bytes, ops: list[dict], source_sheet: str, target_sheet: str) -> tuple[bytes, int]:
+    """Συγχώνευση: εφαρμόζει τις εκκρεμείς ενέργειες ΠΑΝΩ στο τρέχον online αρχείο, κρατώντας
+    όποιες άλλες αλλαγές έκανε άλλος χρήστης στο Excel Online.
+
+    Ελέγχονται μόνο οι γραμμές που μετακινούνται: κάθε barcode πρέπει να βρεθεί με τα ίδια στοιχεία
+    (fingerprint) στο φύλλο από όπου φεύγει. Αν έχει ήδη μετακινηθεί (π.χ. χάθηκε η επιβεβαίωση
+    προηγούμενης εγγραφής), παραλείπεται. Αν η γραμμή άλλαξε ή λείπει, δεν γράφεται τίποτα.
+    Επιστρέφει (νέο περιεχόμενο, πλήθος ενεργειών που εφαρμόστηκαν).
+    """
+    def sheets(op: dict) -> tuple[str, str]:
+        if op.get("kind") == "restore":
+            return target_sheet, source_sheet
+        return source_sheet, target_sheet
+
+    by_row: dict[tuple[str, str], list[dict]] = {}
+    for op in ops:
+        by_row.setdefault((normalize_barcode(op["barcode"]), op["fingerprint"]), []).append(op)
+    with TemporaryDirectory(prefix="warehouse-onedrive-merge-") as tmp:
+        cur, nxt = Path(tmp) / "current.xlsx", Path(tmp) / "next.xlsx"
+        cur.write_bytes(remote)
+        applied = 0
+        try:
+            with WorkbookEditor(cur) as ed:
+                apply: set[tuple[str, str]] = set()
+                for key, lst in by_row.items():
+                    first_from, last_to = sheets(lst[0])[0], sheets(lst[-1])[1]
+                    if ed.contains(first_from, *key):
+                        if first_from != last_to:
+                            apply.add(key)           # π.χ. μεταφορά+επαναφορά: καθαρό αποτέλεσμα μηδέν
+                    elif not ed.contains(last_to, *key):
+                        raise Conflict(f"Η γραμμή του {lst[0]['barcode']} άλλαξε ή λείπει στο online Excel. "
+                                       "Δεν έγινε εγγραφή στο OneDrive· οι μεταφορές παραμένουν στο Supabase.")
+                for op in ops:
+                    key = (normalize_barcode(op["barcode"]), op["fingerprint"])
+                    if key not in apply:
+                        continue
+                    frm, to = sheets(op)
+                    ed.move(Move(frm, to, key[0], key[1], mode=op["mode"] or "auto",
+                                 prefer_row=int(op["source_row"]) if op.get("source_row") else None,
+                                 pick_last=op.get("kind") == "restore"))
+                    applied += 1
+                if applied:
+                    ed.finish(nxt)
+        except (Conflict, ServiceError):
+            raise
+        except TransferError as exc:
+            raise Conflict("Η μεταφορά δεν μπορεί να εφαρμοστεί στο online Excel: " + str(exc)) from exc
+        except Exception as exc:
+            log.warning("Outbox merge could not read Microsoft package: %s", type(exc).__name__)
+            raise ServiceError("Το Excel Online αποθηκεύτηκε με δομή που δεν μπορεί "
+                               "να ενημερωθεί με ασφάλεια. Οι μεταφορές παραμένουν "
+                               "στο Supabase, χωρίς αντικατάσταση.") from None
+        return (nxt.read_bytes() if applied else remote), applied
+
+
 def _journal() -> dict | None:
     with connect() as db:
         row = db.execute("SELECT value FROM app_settings WHERE key=?", (QUEUE_JOURNAL,)).fetchone()
@@ -202,6 +257,7 @@ def _adopt(imp: dict, b: dict, online: bytes, meta: dict, record: dict,
         audit(db, actor, "onedrive.outbox_synced", {
             "import_id": imp["id"], "new_version": version,
             "backup": record["backup_obj"], "operations": record["op_ids"],
+            "merged_with_online_edits": bool(record.get("merged")),
         })
         bump_version(db)
     return {"synced": True, "version": version,
@@ -222,11 +278,19 @@ def flush_under_lease(actor: str = "onedrive-mirror") -> dict:
     token = onedrive._access_token()
     remote, meta = onedrive._stable_download(b["drive_id"], b["item_id"], token)
     desired = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
-    prefix = _remote_prefix(remote, ops)
-    candidate = _replay(remote, ops, prefix, desired, imp["source_sheet"],
-                        imp["target_sheet"])
-    if not _same_cells(candidate, desired):
-        raise Conflict("Τα τελικά κελιά δεν συμφωνούν. Δεν έγινε συγχρονισμός.")
+    try:
+        prefix = _remote_prefix(remote, ops)
+    except Conflict:
+        prefix = None   # κάποιος άλλαξε άλλα κελιά στο Excel Online -> συγχώνευση
+    if prefix is not None:
+        candidate = _replay(remote, ops, prefix, desired, imp["source_sheet"],
+                            imp["target_sheet"])
+        if not _same_cells(candidate, desired):
+            raise Conflict("Τα τελικά κελιά δεν συμφωνούν. Δεν έγινε συγχρονισμός.")
+        must_publish = prefix != len(_groups(ops))
+    else:
+        candidate, applied = _merge(remote, ops, imp["source_sheet"], imp["target_sheet"])
+        must_publish = applied > 0
 
     # Journal + immutable backups BEFORE attempting to touch the online file.
     # If an earlier push succeeded but the acknowledgement was lost, prefix ==
@@ -255,9 +319,9 @@ def flush_under_lease(actor: str = "onedrive-mirror") -> dict:
         record = {"import_id": imp["id"], "target_sha": imp["working_sha256"],
                   "op_ids": [o["id"] for o in ops], "backup_obj": backup_obj,
                   "candidate_obj": candidate_obj, "remote_etag": meta["eTag"],
-                  "candidate_sha": sha256_bytes(candidate)}
+                  "candidate_sha": sha256_bytes(candidate), "merged": prefix is None}
         _save_journal(record)
-    if prefix != len(_groups(ops)):
+    if must_publish:
         # Uses If-Match so a concurrent cloud edit is rejected, not overwritten.
         from app.services.onedrive_reconcile import _publish
         _publish(b["drive_id"], b["item_id"], meta["eTag"], candidate, token)

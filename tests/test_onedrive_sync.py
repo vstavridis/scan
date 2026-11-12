@@ -54,20 +54,28 @@ def test_onedrive_etag_only_drift_is_safe_to_sync(app_env, synthetic_master, mon
 
 
 def test_onedrive_real_external_edit_is_never_overwritten(app_env, synthetic_master, monkeypatch):
+    """Αλλαγή άλλου χρήστη σε άλλη γραμμή: η μεταφορά συγχωνεύεται και η αλλαγή ΔΕΝ χάνεται."""
     original, changed = _pending_after_one_transfer(synthetic_master)
     wb = openpyxl.load_workbook(io.BytesIO(original))
     wb["΄Ετοιμα προϊόντα"]["H2"] = "REAL-EXTERNAL-EDIT"
     output = io.BytesIO()
     wb.save(output)
+    cloud = {"data": output.getvalue(), "etag": "changed-etag"}
     monkeypatch.setattr(onedrive, "_access_token", lambda: "test-access-token")
-    monkeypatch.setattr(onedrive, "_stable_download",
-                        lambda *_: (output.getvalue(), {"eTag": "changed-etag"}))
-    def unsafe_upload(*args):
-        raise AssertionError("Real external edits must never be overwritten")
-    monkeypatch.setattr("app.services.onedrive_reconcile._publish", unsafe_upload)
-    with pytest.raises(Conflict, match="διαφορετικές τιμές"):
-        onedrive.retry_sync()
-    assert onedrive.status()["pending"] is True
+    monkeypatch.setattr(onedrive, "_stable_download", lambda *_: (cloud["data"], {"eTag": cloud["etag"]}))
+
+    def upload(drive, item, etag, candidate, token):
+        assert etag == "changed-etag"
+        book = openpyxl.load_workbook(io.BytesIO(candidate), read_only=True)
+        values = [r[0] for r in book["΄Ετοιμα προϊόντα"].iter_rows(min_col=8, max_col=8, values_only=True)]
+        book.close()
+        assert values[1] == "REAL-EXTERNAL-EDIT"                     # η αλλαγή του άλλου χρήστη μένει
+        cloud["data"], cloud["etag"] = candidate, "after-upload"
+
+    monkeypatch.setattr("app.services.onedrive_reconcile._publish", upload)
+    assert onedrive.retry_sync() is True
+    assert onedrive.status()["pending"] is False
+    assert cloud["etag"] == "after-upload"
 
 
 def test_onedrive_lost_ack_already_uploaded_marks_synced(app_env, synthetic_master, monkeypatch):

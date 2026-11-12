@@ -521,6 +521,15 @@ class WorkbookEditor:
             raise RowNotFoundError("Η γραμμή δεν βρέθηκε στο XML του φύλλου.")
         return idx
 
+    def contains(self, sheet: str, barcode_norm: str, fingerprint: str) -> bool:
+        """Υπάρχει στο φύλλο γραμμή με αυτό το barcode ΚΑΙ τα ίδια στοιχεία (fingerprint);"""
+        doc = self._doc(self._part(sheet), repr(sheet))
+        try:
+            self._locate(doc, Move(sheet, sheet, barcode_norm, fingerprint, pick_last=True))
+            return True
+        except RowNotFoundError:
+            return False
+
     # -- μία μετακίνηση --------------------------------------------------------
     def move(self, m: Move) -> TransferResult:
         if m.mode not in ("auto", "shift", "clear"):

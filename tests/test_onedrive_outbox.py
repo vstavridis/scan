@@ -100,21 +100,64 @@ def test_two_transfers_continue_when_onedrive_locked_and_replay_after(app_env, s
     assert onedrive_outbox.retry_sync()["operations"] == 0
 
 
-def test_real_external_cell_edit_does_not_stop_warehouse_but_blocks_mirror(app_env, synthetic_master, monkeypatch):
-    cloud = setup_remote(app_env, synthetic_master, monkeypatch)
+def _online_edit(cloud, sheet, cell, value):
     wb = openpyxl.load_workbook(io.BytesIO(cloud["data"]))
-    wb["΄Ετοιμα προϊόντα"]["H2"] = "EXTERNAL-CELL-EDIT"
+    wb[sheet][cell] = value
     output = io.BytesIO()
     wb.save(output)
     cloud["data"], cloud["etag"] = output.getvalue(), "external-change"
-    calls = []
-    monkeypatch.setattr("app.services.onedrive_reconcile._publish",
-                        lambda *a: calls.append("unsafe-write"))
 
+
+def _sheet_values(data, sheet, col=8):
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+    out = [r[0] for r in wb[sheet].iter_rows(min_col=col, max_col=col, values_only=True)]
+    wb.close()
+    return out
+
+
+def test_external_edit_elsewhere_is_kept_and_transfer_is_merged(app_env, synthetic_master, monkeypatch):
+    """Άλλος χρήστης άλλαξε άλλα κελιά στο Excel Online (ανοιχτό αρχείο): η μεταφορά εφαρμόζεται
+    πάνω στο online αρχείο και η αλλαγή του άλλου χρήστη ΔΕΝ χάνεται."""
+    cloud = setup_remote(app_env, synthetic_master, monkeypatch)
+    _online_edit(cloud, "΄Ετοιμα προϊόντα", "M40", "ΣΗΜΕΙΩΣΗ ΑΛΛΟΥ ΧΡΗΣΤΗ")
+    _online_edit(cloud, "Σβησμενα ", "A1", "Τίτλος από Excel Online")
+
+    def publish(drive, item, etag, candidate, token):
+        assert etag == cloud["etag"]                       # If-Match: δεν πατάμε νεότερη αλλαγή
+        cloud["data"], cloud["etag"] = repack(candidate), "after-upload"
+
+    monkeypatch.setattr("app.services.onedrive_reconcile._publish", publish)
+    result = move("VS11486")
+    assert result["ok"] and result["onedrive_synced"] is True
+    assert onedrive.status()["pending"] is False
+    assert "VS11486" not in _sheet_values(cloud["data"], "΄Ετοιμα προϊόντα")
+    assert _sheet_values(cloud["data"], "Σβησμενα ").count("VS11486") == 1
+    assert _sheet_values(cloud["data"], "΄Ετοιμα προϊόντα", 13).count("ΣΗΜΕΙΩΣΗ ΑΛΛΟΥ ΧΡΗΣΤΗ") == 1
+    assert _sheet_values(cloud["data"], "Σβησμενα ", 1)[0] == "Τίτλος από Excel Online"
+    # Το ασφαλές αντίγραφο στο Supabase περιέχει πλέον και την αλλαγή του άλλου χρήστη
+    imp = active_import()
+    work = get_store().get(imp["working_object"])
+    assert _sheet_values(work, "Σβησμενα ", 1)[0] == "Τίτλος από Excel Online"
+    # και οι επόμενες μεταφορές συνεχίζουν κανονικά
+    assert move("VS11487")["onedrive_synced"] is True
+    assert _sheet_values(cloud["data"], "Σβησμενα ").count("VS11487") == 1
+    assert _sheet_values(cloud["data"], "Σβησμενα ", 1)[0] == "Τίτλος από Excel Online"
+
+
+def test_external_edit_of_moved_row_blocks_only_the_mirror(app_env, synthetic_master, monkeypatch):
+    """Αν άλλαξε η ίδια η γραμμή που μεταφέρεται, δεν γράφεται τίποτα στο OneDrive."""
+    cloud = setup_remote(app_env, synthetic_master, monkeypatch)
+    wb = openpyxl.load_workbook(io.BytesIO(cloud["data"]), read_only=True)
+    row = next(i for i, r in enumerate(wb["΄Ετοιμα προϊόντα"].iter_rows(min_col=8, max_col=8, values_only=True),
+                                        start=1) if r[0] == "VS11486")
+    wb.close()
+    _online_edit(cloud, "΄Ετοιμα προϊόντα", f"E{row}", 999)     # άλλαξαν τα κιλά της γραμμής
+    calls = []
+    monkeypatch.setattr("app.services.onedrive_reconcile._publish", lambda *a: calls.append("write"))
     result = move("VS11486")
     assert result["ok"] and result["onedrive_synced"] is False
     assert not calls
-    with pytest.raises(Conflict, match="διαφορετικές τιμές"):
+    with pytest.raises(Conflict, match="VS11486"):
         onedrive_outbox.retry_sync()
     assert active_import()["working_version"] == 2
     assert onedrive.status()["pending"] is True
