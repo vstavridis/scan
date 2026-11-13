@@ -18,7 +18,7 @@ const MAX_BATCH = 100;
 
 const S = window.__whScanner || (window.__whScanner = {
   inited: false, root: null, refs: {}, setTrigger: null,
-  cfg: { terminator: 'enter', key_mapping: 'physical', sound_default: true, inter_key_timeout_ms: 0 },
+  cfg: { terminator: 'enter', key_mapping: 'physical', sound_default: true, inter_key_timeout_ms: 0, auto_fullscreen: true },
   items: [], hasCatalog: true, user: '', error: null,
   pending: new Map(), results: new Map(), handledAcks: new Set(),
   inflight: null, backoff: 1000, retryAt: 0,
@@ -26,6 +26,7 @@ const S = window.__whScanner || (window.__whScanner = {
   buffer: '', lastKeyAt: 0, latestEventId: null, flash: new Map(),
   idbOk: true, idbError: null, db: null, soundOn: true, soundSet: false, lastSeq: 0,
   kiosk: false, renderQueued: false, lastListHtml: '',
+  autoFsArmed: false, autoFsVisit: null,
 });
 
 // ------------------------------------------------------------------ utils
@@ -268,6 +269,7 @@ function onKeyDown(e) {
   if (!S.root || !S.root.isConnected) return;   // η σελίδα σάρωσης δεν είναι ανοιχτή
   if (isForeignInput(e.target)) return;          // πληκτρολόγηση σε άλλο πεδίο της εφαρμογής
   audio();                                       // το πρώτο πλήκτρο ξεκλειδώνει τον ήχο
+  if (e.key !== 'Escape' && e.key !== 'F9') autoFullscreenOnGesture();
   if (e.key === 'F9') { e.preventDefault(); toggleFullscreen(); return; }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const isTerm = e.key === 'Enter' || e.code === 'NumpadEnter' || (e.key === 'Tab' && S.cfg.terminator === 'enter_tab');
@@ -281,6 +283,7 @@ function onKeyDown(e) {
   if (e.key === 'Backspace') { e.preventDefault(); S.buffer = S.buffer.slice(0, -1); renderBuffer(); return; }
   if (e.key === 'Escape') {
     // Έξοδος από πλήρη οθόνη (ο browser συνήθως το κάνει ήδη μόνος του με Esc)
+    S.autoFsArmed = false;                       // ο χρήστης βγήκε: όχι ξανά αυτόματα σε αυτή την επίσκεψη
     if (S.kiosk || document.fullscreenElement) toggleFullscreen();
     S.buffer = ''; renderBuffer(); return;
   }
@@ -296,12 +299,31 @@ function onKeyDown(e) {
 }
 
 // ------------------------------------------------------------------ πλήρης οθόνη
+// Αυτόματη πλήρης οθόνη στη σελίδα Scanner: η λίστα καλύπτει αμέσως όλο το παράθυρο (kiosk)·
+// η πραγματική πλήρης οθόνη του browser χρειάζεται ενέργεια του χρήστη, οπότε ζητείται με το
+// πρώτο κλικ ή το πρώτο πλήκτρο/barcode. Ο browser δεν επιτρέπει να γίνει χωρίς αυτό.
+function autoFullscreenOnVisit() {
+  if (!S.cfg.auto_fullscreen || S.autoFsVisit === S.root) return;
+  S.autoFsVisit = S.root;                        // μία φορά ανά άνοιγμα της σελίδας Scanner
+  if (!S.kiosk) setKiosk(true);
+  S.autoFsArmed = !document.fullscreenElement;
+}
+function autoFullscreenOnGesture() {
+  if (!S.autoFsArmed || !S.kiosk || document.fullscreenElement || !S.root) return;
+  S.autoFsArmed = false;
+  try {
+    const p = S.root.requestFullscreen && S.root.requestFullscreen({ navigationUI: 'hide' });
+    if (p && p.catch) p.then(() => { S.fsDenied = false; scheduleRender(); })
+      .catch(() => { S.fsDenied = true; scheduleRender(); });
+  } catch (e) { S.fsDenied = true; }
+}
 function setKiosk(v) {
   S.kiosk = v;
   if (S.root) S.root.classList.toggle('whs-kiosk', v);
   scheduleRender();
 }
 async function toggleFullscreen() {
+  S.autoFsArmed = false;
   if (document.fullscreenElement || S.kiosk) {
     if (document.fullscreenElement) { try { await document.exitFullscreen(); } catch (e) { /* ignore */ } }
     setKiosk(false);
@@ -436,7 +458,10 @@ async function initOnce() {
   S.inited = true;
   S.lastSeq = parseInt(lsGet('wh.seq') || '0', 10) || 0;
   document.addEventListener('keydown', onKeyDown, true);
-  document.addEventListener('click', () => audio(), true);
+  document.addEventListener('click', (e) => {
+    audio();
+    if (!(e.target && e.target.closest && e.target.closest('[data-ref=btn-fs]'))) autoFullscreenOnGesture();
+  }, true);
   window.addEventListener('blur', updateFocus);
   window.addEventListener('focus', updateFocus);
   window.addEventListener('online', () => { S.retryAt = 0; maybeSend(true); scheduleRender(); });
@@ -469,6 +494,7 @@ export default function (component) {
   attach(parentElement);
   if (!S.inited) initOnce();
   onData(data);
+  autoFullscreenOnVisit();
   // Χωρίς cleanup: η κατάσταση (ουρά, listeners) πρέπει να επιβιώνει από τα Streamlit reruns.
   return () => {};
 }

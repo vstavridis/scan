@@ -118,7 +118,8 @@ def scanner_panel(cfg: dict[str, Any]) -> None:
             "error": error,
             "user": p.name if p else "",
             "refresh_seconds": refresh,
-            "cfg": {k: cfg[k] for k in ("terminator", "key_mapping", "sound_default", "inter_key_timeout_ms")},
+            "cfg": {k: cfg[k] for k in ("terminator", "key_mapping", "sound_default", "inter_key_timeout_ms",
+                                         "auto_fullscreen")},
         }
         _component(key=KEY, data=data, on_batch_change=_on_batch, height="content")
 

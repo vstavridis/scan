@@ -54,6 +54,7 @@ def public_config() -> dict[str, Any]:
         "terminator": cfg["scanner_terminator"],
         "key_mapping": cfg["scanner_key_mapping"],
         "sound_default": cfg["scanner_sound_default"],
+        "auto_fullscreen": cfg["scanner_auto_fullscreen"],
         "inter_key_timeout_ms": cfg["scanner_inter_key_timeout_ms"],
         "dashboard_refresh_seconds": cfg["dashboard_refresh_seconds"],
         "scanner_refresh_seconds": cfg["scanner_refresh_seconds"],

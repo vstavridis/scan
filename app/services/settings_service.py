@@ -14,6 +14,8 @@ DEFAULTS: dict[str, Any] = {
     # "layout": ό,τι χαρακτήρα δίνει η τρέχουσα διάταξη πληκτρολογίου
     "scanner_key_mapping": "physical",
     "scanner_sound_default": True,
+    # Η σελίδα Scanner ανοίγει κατευθείαν σε πλήρη οθόνη
+    "scanner_auto_fullscreen": True,
     # Μέγιστο κενό (ms) μεταξύ πλήκτρων· μετά από αυτό, ο buffer θεωρείται νέα πληκτρολόγηση
     "scanner_inter_key_timeout_ms": 0,
     "dashboard_refresh_seconds": 1.5,

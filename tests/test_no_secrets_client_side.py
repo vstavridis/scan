@@ -33,7 +33,7 @@ def test_scanner_component_data_contains_only_display_data(app_env, synthetic_ma
         if secret:
             assert secret not in blob
     assert "postgres" not in blob.lower() and "sb_secret" not in blob
-    assert set(cfg) == {"terminator", "key_mapping", "sound_default", "inter_key_timeout_ms",
+    assert set(cfg) == {"terminator", "key_mapping", "sound_default", "auto_fullscreen", "inter_key_timeout_ms",
                         "dashboard_refresh_seconds", "scanner_refresh_seconds", "has_catalog", "catalog_name"}
 
 

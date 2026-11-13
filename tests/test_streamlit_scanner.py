@@ -286,12 +286,17 @@ def test_two_computers_stay_in_sync(browser, tmp_path, synthetic_master):
 def test_fullscreen_and_greek_layout(browser, tmp_path, synthetic_master):
     with app_server(tmp_path) as srv:
         activate_workbook(synthetic_master)
-        ctx, page = open_scanner(browser, srv.url)
-        page.click("[data-ref=btn-fs]")
-        page.wait_for_function("document.querySelector('.whs-root').classList.contains('whs-kiosk')")
+        ctx = browser.new_context(viewport={"width": 1400, "height": 950})
+        page = ctx.new_page()
+        open_page(page, srv.url, "scanner", "Αποθήκη PC1")
+        page.wait_for_selector(".whs-root", timeout=30000)
+        # ανοίγει κατευθείαν σε πλήρη οθόνη (η λίστα καλύπτει όλο το παράθυρο)
+        page.wait_for_function("document.querySelector('.whs-root').classList.contains('whs-kiosk')", timeout=10000)
+        box = page.locator(".whs-root").bounding_box()
+        assert box["x"] == 0 and box["y"] == 0 and box["width"] == 1400 and box["height"] == 950
+        wait_connected(page)
+        page.mouse.click(700, 600)   # το πρώτο κλικ -> πραγματική πλήρης οθόνη browser
         page.wait_for_function("document.fullscreenElement === document.querySelector('.whs-root')", timeout=5000)
-        assert not page.is_visible("[data-ref=btn-fs]")            # στο fullscreen: μόνο λίστα/μετρητές/σύνδεση
-        assert page.is_visible("[data-ref=conn]") and page.is_visible("[data-ref=c-ok]") and page.is_visible("[data-ref=c-pending]")
         # ελληνική διάταξη: τα φυσικά πλήκτρα V,S δίνουν Ω,Σ
         page.evaluate("""() => {
           const keys = [['Ω','KeyV',true],['Σ','KeyS',true],['1','Digit1'],['1','Digit1'],['4','Digit4'],['8','Digit8'],['6','Digit6']];
@@ -304,6 +309,11 @@ def test_fullscreen_and_greek_layout(browser, tmp_path, synthetic_master):
         page.keyboard.press("Escape")
         page.wait_for_function("!document.fullscreenElement")
         page.wait_for_function("!document.querySelector('.whs-root').classList.contains('whs-kiosk')")
+        page.mouse.click(700, 600)          # μετά το Esc δεν ξαναμπαίνει μόνο του
+        page.wait_for_timeout(500)
+        assert page.evaluate("!document.fullscreenElement && !document.querySelector('.whs-root').classList.contains('whs-kiosk')")
+        page.click("[data-ref=btn-fs]")     # το κουμπί λειτουργεί όπως πριν
+        page.wait_for_function("document.fullscreenElement === document.querySelector('.whs-root')", timeout=5000)
         ctx.close()
 
 
@@ -352,6 +362,9 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
             page.get_by_role("link", name=link).click()
             page.wait_for_selector(marker, timeout=30000)
             assert page.locator('[data-testid="stException"]').count() == 0, link
+            if link == "Scanner":
+                page.wait_for_function("document.querySelector('.whs-root').classList.contains('whs-kiosk')")
+                page.keyboard.press("Escape")   # έξοδος από την πλήρη οθόνη για να φανεί το μενού
         assert "user=" in page.url  # το όνομα μένει στο URL (σελιδοδείκτης)
         # σκανάρισμα + μεταφορά με ένα κλικ, χωρίς login ή δεύτερη επιβεβαίωση
         page.get_by_role("link", name="Scanner").click()
@@ -360,6 +373,8 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         page.mouse.click(700, 600)
         wedge(page, "VS11486")
         page.wait_for_selector(".whs-fb-ok", timeout=15000)
+        page.keyboard.press("Escape")
+        page.wait_for_function("!document.querySelector('.whs-root').classList.contains('whs-kiosk')")
         page.get_by_role("link", name="Dashboard").click()
         page.get_by_role("tab", name="Αναλυτική λίστα").click()
         page.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
@@ -506,9 +521,44 @@ def test_periodic_refresh_does_not_show_running_indicator(browser, tmp_path, syn
                              ("Ιστορικό", "text=Μεταφορές & Επαναφορά")):
             page.get_by_role("link", name=link).click()
             page.wait_for_selector(marker, timeout=30000)
+            if link == "Scanner":
+                page.keyboard.press("Escape")
             vis = page.evaluate("""() => { const h = document.querySelector('[data-testid="stHeader"]') || document.body;
                 const w = document.createElement('div'); w.setAttribute('data-testid', 'stStatusWidget');
                 w.className = 'stStatusWidget'; w.textContent = 'Stop'; h.appendChild(w);
                 const v = getComputedStyle(w).visibility; w.remove(); return v; }""")
             assert vis == "hidden", link
+        ctx.close()
+
+
+def test_scanner_page_opens_fullscreen_but_dashboard_does_not(browser, tmp_path, synthetic_master):
+    """/scanner ανοίγει σε πλήρη οθόνη· η αρχική σελίδα (Dashboard) όχι· ρυθμίζεται από τις Ρυθμίσεις."""
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        ctx = browser.new_context(viewport={"width": 1400, "height": 950})
+        page = ctx.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        page.wait_for_timeout(1000)
+        assert page.locator(".whs-root").count() == 0 and page.evaluate("!document.fullscreenElement")
+        # μετάβαση στο Scanner από το μενού: επίσης πλήρης οθόνη
+        page.get_by_role("link", name="Scanner").click()
+        page.wait_for_function("document.querySelector('.whs-root')?.classList.contains('whs-kiosk')", timeout=30000)
+        wait_connected(page)
+        wedge(page, "VS11486")                    # το πρώτο barcode ζητά και την πλήρη οθόνη browser
+        page.wait_for_selector(".whs-fb-ok", timeout=15000)
+        page.wait_for_function("document.fullscreenElement === document.querySelector('.whs-root')", timeout=5000)
+        assert [i["barcode"] for i in backend.dashboard(login("secretary"))["items"]] == ["VS11486"]
+        ctx.close()
+
+        backend.update_settings(login("admin"), {"scanner_auto_fullscreen": False})
+        ctx = browser.new_context(viewport={"width": 1400, "height": 950})
+        page = ctx.new_page()
+        open_page(page, srv.url, "scanner")
+        page.wait_for_selector(".whs-root", timeout=30000)
+        wait_connected(page)
+        page.mouse.click(700, 600)
+        page.wait_for_timeout(800)
+        assert page.evaluate("!document.fullscreenElement && "
+                             "!document.querySelector('.whs-root').classList.contains('whs-kiosk')")
         ctx.close()

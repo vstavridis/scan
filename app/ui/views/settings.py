@@ -256,6 +256,10 @@ def _scanner_settings() -> None:
                            format_func=lambda v: {"physical": "Φυσικά πλήκτρα (σωστό ακόμη και με ελληνική διάταξη)",
                                                   "layout": "Τρέχουσα διάταξη πληκτρολογίου"}[v])
         sound = st.checkbox("Ήχος ενεργός από προεπιλογή", value=cfg["scanner_sound_default"])
+        autofs = st.checkbox("Η σελίδα Scanner ανοίγει σε πλήρη οθόνη", value=cfg["scanner_auto_fullscreen"],
+                             help="Η λίστα καλύπτει αμέσως όλο το παράθυρο· η πλήρης οθόνη του browser ενεργοποιείται "
+                                  "με το πρώτο κλικ ή το πρώτο barcode (ο browser δεν επιτρέπει να γίνει μόνη της). "
+                                  "Έξοδος με Esc.")
         gap = st.number_input("Μέγιστο κενό μεταξύ πλήκτρων (ms, 0 = χωρίς όριο)", 0, 5000,
                               int(cfg["scanner_inter_key_timeout_ms"]), step=50)
         refresh = st.number_input("Ανανέωση dashboard (δευτερόλεπτα)", 0.5, 60.0, float(cfg["dashboard_refresh_seconds"]), step=0.5)
@@ -274,6 +278,7 @@ def _scanner_settings() -> None:
             try:
                 backend.update_settings(principal(), {
                     "scanner_terminator": term, "scanner_key_mapping": mapping, "scanner_sound_default": sound,
+                    "scanner_auto_fullscreen": autofs,
                     "scanner_inter_key_timeout_ms": int(gap), "dashboard_refresh_seconds": float(refresh),
                     "scanner_refresh_seconds": float(srefresh), "transfer_mode": mode})
                 st.success("Οι ρυθμίσεις αποθηκεύτηκαν. Οι οθόνες τις παίρνουν με την επόμενη ανανέωση σελίδας.")
