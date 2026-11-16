@@ -1,4 +1,4 @@
-"""Ιστορικό: σκαναρίσματα (φίλτρα, εξαγωγή), μεταφορές με επαναφορά, κατάσταση συγχρονισμού Excel/OneDrive."""
+"""Ιστορικό: σκαναρίσματα (φίλτρα, εξαγωγή) και μεταφορές με επαναφορά."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -24,70 +24,7 @@ COLUMNS = {
 }
 
 
-def _sync_panel() -> None:
-    """Πίνακας συγχρονισμού: Supabase working Excel και online OneDrive Excel."""
-    try:
-        s = backend.sync_status(principal())
-    except ServiceError as exc:
-        show_error(exc)
-        return
-    od = s.get("onedrive") or {}
-    if od.get("bound"):
-        online = "✔ Ενημερωμένο" if not od.get("pending") else "⏳ Σε εκκρεμότητα"
-    else:
-        online = "Δεν έχει συνδεθεί"
-    cards = [
-        ("Τελευταίος επιτυχής συγχρονισμός", fmt_local(s["last_ok_at"]) if s.get("last_ok_at") else "—"),
-        ("Μεταφορές σε εκκρεμότητα", str(s["pending"])),
-        ("Έκδοση Excel (Supabase)", f"v{s['excel_version']}" if s.get("excel_version") else "—"),
-        ("Online Excel (OneDrive)", online),
-    ]
-    c = st.columns(4)
-    for col, (label, value) in zip(c, cards):
-        col.markdown(f"<div class='sync-card'><div class='sync-label'>{label}</div>"
-                     f"<div class='sync-value'>{value}</div></div>", unsafe_allow_html=True)
-    if s["pending"]:
-        st.info(f"⏳ {s['pending']} ενέργειες περιμένουν ενημέρωση του Excel "
-                f"(παλαιότερη: {fmt_local(s['oldest_pending'])}). Γίνεται αυτόματα στο παρασκήνιο.")
-    else:
-        st.success("✔ Το Excel στο Supabase είναι ενημερωμένο με όλες τις μεταφορές.")
-    if s.get("last_error") and s["pending"]:
-        st.warning(f"Τελευταίο προσωρινό σφάλμα ({fmt_local(s['last_error']['at'])}): {s['last_error']['error']}")
-    if not s.get("worker_running"):
-        st.caption("Ο αυτόματος συγχρονισμός δεν τρέχει σε αυτή τη διεργασία· χρησιμοποιήστε «Συγχρονισμός τώρα».")
-
-    if od.get("bound"):
-        synced = f"v{od['synced_version']}" if od.get("synced_version") else "—"
-        when = fmt_local(od["synced_at"]) if od.get("synced_at") else "—"
-        if od.get("pending"):
-            behind = (s["excel_version"] or 0) - (od.get("synced_version") or 0)
-            st.warning(f"Το online Excel «{od.get('name') or ''}» δεν είναι ενημερωμένο: έχει την έκδοση {synced}, "
-                       f"{behind} έκδοση/εις πίσω. Ξαναδοκιμάζεται αυτόματα (π.χ. όταν κλείσει το αρχείο στο Excel Online).")
-            if s.get("onedrive_last_error"):
-                st.caption(f"Τελευταία αιτία ({fmt_local(s['onedrive_last_error']['at'])}): "
-                           f"{s['onedrive_last_error']['error']}")
-        else:
-            st.success(f"✔ Το online Excel «{od.get('name') or ''}» είναι ενημερωμένο ({synced}).")
-        st.caption(f"Τελευταίος επιτυχής συγχρονισμός OneDrive: {when}")
-        if od.get("link"):
-            st.link_button("Άνοιγμα online Excel", od["link"])
-
-    if s["failed_24h"]:
-        with st.expander(f"Αποτυχίες τελευταίου 24ώρου ({len(s['failed_24h'])})"):
-            st.dataframe(pd.DataFrame([
-                {"Barcode": f["barcode"], "Ενέργεια": "Επαναφορά" if f["kind"] == "restore" else "Μεταφορά",
-                 "Πότε": fmt_local(f["finished_at"]), "Αιτία": f["error"]} for f in s["failed_24h"]
-            ]), hide_index=True, width="stretch")
-            st.caption("Οι αποτυχημένες μεταφορές επέστρεψαν στην ενεργή λίστα του Dashboard.")
-    if st.button("🔄 Συγχρονισμός τώρα", key="sync_now"):
-        with st.spinner("Συγχρονισμός Excel…"):
-            try:
-                out = backend.sync_now(principal())
-                st.success(f"Ολοκληρώθηκαν {len(out.get('completed') or [])} ενέργειες.")
-                if out.get("onedrive_warning"):
-                    st.warning(out["onedrive_warning"])
-            except ServiceError as exc:
-                show_error(exc)
+TRANSFERS_SHOWN = 25   # μόνο οι πιο πρόσφατες μεταφορές
 
 
 def _transfer_status(t: dict) -> tuple[str, bool]:
@@ -119,13 +56,15 @@ def _transfers_list(term: str) -> None:
     if msg:
         getattr(st, msg[0])(msg[1])
     try:
-        rows = backend.list_transfers(principal(), barcode=term or None, limit=100)
+        rows = backend.list_transfers(principal(), barcode=term or None, limit=TRANSFERS_SHOWN)
     except ServiceError as exc:
         show_error(exc)
         return
     if not rows:
         st.info("Δεν υπάρχουν μεταφορές.")
         return
+    st.caption(f"Οι {len(rows)} πιο πρόσφατες μεταφορές (έως {TRANSFERS_SHOWN}). "
+               "Για παλαιότερες, γράψτε το barcode στην αναζήτηση.")
     widths = [1.1, 0.7, 1.4, 1.1, 2.2, 2.1]
     hdr = st.columns(widths)
     for col, label in zip(hdr, ["Barcode", "Κιλά", "Πότε", "Χρήστης", "Κατάσταση", ""]):
@@ -154,12 +93,10 @@ def page() -> None:
     if not require("dashboard"):
         return
     st.title("Ιστορικό")
-    tab_scans, tab_transfers, tab_sync = st.tabs(
-        ["Σκαναρίσματα", "Μεταφορές & Επαναφορά", "Συγχρονισμός"], key="hist_tabs", on_change="rerun")
+    tab_scans, tab_transfers = st.tabs(
+        ["Σκαναρίσματα", "Μεταφορές & Επαναφορά"], key="hist_tabs", on_change="rerun")
     with tab_transfers:
         _transfers_tab()
-    with tab_sync:
-        st.fragment(run_every=5)(_sync_panel)()
     with tab_scans:
         _scans()
 

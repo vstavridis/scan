@@ -314,7 +314,7 @@ def page() -> None:
         sync = data.get("sync") or {}
         if imp is not None and sync.get("pending"):
             st.info(f"⏳ Ενημέρωση Excel σε εξέλιξη: {sync['pending']} μεταφορές/επαναφορές σε αναμονή "
-                    "(γίνεται αυτόματα). Λεπτομέρειες: Ιστορικό → Συγχρονισμός.")
+                    "(γίνεται αυτόματα). Λεπτομέρειες: Ρυθμίσεις → Συγχρονισμός.")
         if imp is not None and data.get("onedrive_pending"):
             err = sync.get("onedrive_last_error")
             reason = (f"  \n**Αιτία τελευταίας προσπάθειας** ({fmt_local(err['at'])}): {err['error']}"
@@ -322,7 +322,7 @@ def page() -> None:
             st.warning("Το online Excel στο OneDrive δεν έχει ακόμη όλες τις μεταφορές. Οι μεταφορές είναι "
                        "αποθηκευμένες με ασφάλεια στο Supabase και η αποθήκη δουλεύει κανονικά· το OneDrive "
                        "ξαναδοκιμάζεται αυτόματα. Αν το αρχείο είναι ανοιχτό στο Excel Online, κλείστε το για "
-                       "λίγο ώστε να ενημερωθεί. Λεπτομέρειες: Ιστορικό → Συγχρονισμός." + reason)
+                       "λίγο ώστε να ενημερωθεί. Λεπτομέρειες: Ρυθμίσεις → Συγχρονισμός." + reason)
         _metrics(data["totals"])
         items = data["items"]
         tab_sum, tab_list, tab_review = st.tabs(

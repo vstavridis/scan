@@ -445,7 +445,7 @@ def test_bulk_transfer_correction_remove_and_restore(browser, tmp_path, syntheti
         activate_workbook(synthetic_master)
         p = login("scanner")
         scan(p, "VS11486", "VS11487", "VS90002", "V90003")
-        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        ctx = signed_in_context(browser, viewport={"width": 1500, "height": 1100})
         page = ctx.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -495,12 +495,15 @@ def test_bulk_transfer_correction_remove_and_restore(browser, tmp_path, syntheti
                  if b in _barcodes(working_file(tmp_path), "Σβησμενα ")]
         assert len(moved) == 2
 
-        # Ιστορικό: πίνακας συγχρονισμού + επαναφορά
-        page.get_by_role("link", name="Ιστορικό").click()
-        page.get_by_role("tab", name="Συγχρονισμός").click()
+        # Ρυθμίσεις: πίνακας συγχρονισμού (δεν υπάρχει πια στο Ιστορικό)
+        page.get_by_role("link", name="Ρυθμίσεις").click()
+        page.wait_for_selector("text=Συγχρονισμός Excel / OneDrive", timeout=30000)
         page.wait_for_selector("text=Μεταφορές σε εκκρεμότητα", timeout=20000)
         page.wait_for_selector("text=Το Excel στο Supabase είναι ενημερωμένο", timeout=20000)
+        # Ιστορικό: επαναφορά
+        page.get_by_role("link", name="Ιστορικό").click()
         page.get_by_role("tab", name="Μεταφορές & Επαναφορά").click()
+        assert page.get_by_role("tab", name="Συγχρονισμός").count() == 0
         page.get_by_role("button", name="↩ Επαναφορά στα Έτοιμα").first.click()
         page.wait_for_selector("text=επανέρχεται στα Έτοιμα προϊόντα", timeout=20000)
         deadline = time.time() + 60
@@ -638,3 +641,28 @@ def test_settings_only_for_streamlit_signed_in_users(browser, tmp_path, syntheti
             backend.imports(anon)
         with pytest.raises(PermissionDenied):
             backend.update_settings(anon, {"scanner_auto_fullscreen": False})
+
+
+
+def test_history_shows_latest_25_transfers(browser, tmp_path, synthetic_master):
+    from app.services import transfer as transfer_service
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        codes = [f"TST{i:04d}" for i in range(1, 31)]
+        scan(login("scanner"), *codes)
+        sec = login("secretary")
+        backend.queue_transfers(sec, [i["id"] for i in backend.dashboard(sec)["items"]])
+        while transfer_service.process_pending()["processed"]:
+            pass
+        assert len(backend.list_transfers(sec)) == 30
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        open_page(page, srv.url, "history")
+        page.get_by_role("tab", name="Μεταφορές & Επαναφορά").click()
+        btns = page.get_by_role("button", name="↩ Επαναφορά στα Έτοιμα")
+        btns.first.wait_for(timeout=30000)
+        assert btns.count() == 25
+        assert page.locator("text=Οι 25 πιο πρόσφατες μεταφορές").count() == 1
+        newest = backend.list_transfers(sec)[0]["barcode"]
+        assert page.locator(f".row-cell:text-is('{newest}')").count() == 1
+        ctx.close()
