@@ -63,10 +63,10 @@ except Exception as exc:  # pragma: no cover - εμφανίζεται στον �
     st.error(f"Δεν ήταν δυνατή η εκκίνηση: {type(exc).__name__}")
     st.stop()
 
-from app.ui.common import inject_css, user_sidebar  # noqa: E402
+from app.ui.common import inject_css, streamlit_signed_in, user_sidebar  # noqa: E402
 from app.ui.views import dashboard, history, scanner, settings  # noqa: E402
 
-if "code" in st.query_params and "state" in st.query_params:
+if "code" in st.query_params and "state" in st.query_params and streamlit_signed_in():
     from app.services import onedrive
     try:
         account = onedrive.finish_authorization(str(st.query_params["code"]), str(st.query_params["state"]))
@@ -75,7 +75,7 @@ if "code" in st.query_params and "state" in st.query_params:
         st.session_state["onedrive_auth_message"] = "Η σύνδεση Microsoft απέτυχε. Δοκιμάστε ξανά από τις Ρυθμίσεις."
     st.query_params.clear()
     st.rerun()
-elif "error" in st.query_params and "state" in st.query_params:
+elif "error" in st.query_params and "state" in st.query_params and streamlit_signed_in():
     st.session_state["onedrive_auth_message"] = "Η Microsoft δεν έδωσε άδεια σύνδεσης."
     st.query_params.clear()
     st.rerun()
@@ -85,13 +85,16 @@ user_sidebar()
 if st.session_state.pop("onedrive_auth_message", None):
     st.info("Η Microsoft επέστρεψε στην εφαρμογή. Δείτε την ενότητα OneDrive στις Ρυθμίσεις.")
 
-# Πρόσβαση: Private app στο Streamlit Community Cloud (μόνο προσκεκλημένοι). Όλες οι οθόνες για όλους.
-nav = st.navigation([
+# Dashboard, Scanner, Ιστορικό: για όλους. Ρυθμίσεις: μόνο για χρήστες συνδεδεμένους με λογαριασμό
+# Streamlit (Streamlit Cloud). Χωρίς σύνδεση η σελίδα δεν υπάρχει καν στο μενού ούτε στο /settings.
+pages = [
     st.Page(dashboard.page, title="Dashboard", icon="📊", url_path="dashboard", default=True),
     st.Page(scanner.page, title="Scanner", icon="📟", url_path="scanner"),
     st.Page(history.page, title="Ιστορικό", icon="🗂️", url_path="history"),
-    st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"),
-])
+]
+if streamlit_signed_in():
+    pages.append(st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"))
+nav = st.navigation(pages)
 try:
     nav.run()
 except DatabaseConnectionError as exc:

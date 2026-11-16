@@ -7,7 +7,7 @@ import streamlit as st
 from app.timeutil import fmt_local
 from app import backend
 from app.services.errors import ServiceError
-from app.ui.common import principal, require, show_error
+from app.ui.common import principal, require, show_error, streamlit_signed_in
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -288,6 +288,9 @@ def _scanner_settings() -> None:
 
 def page() -> None:
     if not require("admin"):
+        return
+    if not streamlit_signed_in():   # δεύτερος έλεγχος, πέρα από το μενού
+        st.error("Οι Ρυθμίσεις είναι διαθέσιμες μόνο σε χρήστες συνδεδεμένους με λογαριασμό Streamlit.")
         return
     st.title("Ρυθμίσεις")
     p = principal()

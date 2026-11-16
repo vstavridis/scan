@@ -116,7 +116,8 @@ def _cloud_email() -> str | None:
         if getattr(user, "is_logged_in", None) is False:
             return None
         email = user.get("email") if hasattr(user, "get") else getattr(user, "email", None)
-        return str(email) if email and "@" in str(email) else None
+        from app.auth import is_streamlit_account
+        return str(email) if is_streamlit_account(str(email) if email else None) else None
     except Exception:
         return None
 
@@ -124,6 +125,11 @@ def _cloud_email() -> str | None:
 def principal() -> Principal:
     """Ο χρήστης της συνεδρίας: email από το Streamlit Cloud + προαιρετικό όνομα (για το audit)."""
     return backend.identity(st.session_state.get("wh_user_name"), _cloud_email())
+
+
+def streamlit_signed_in() -> bool:
+    """Ο χρήστης έχει συνδεθεί με λογαριασμό Streamlit (Streamlit Cloud)."""
+    return _cloud_email() is not None
 
 
 def require(_permission: str = "") -> bool:

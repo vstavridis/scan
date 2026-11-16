@@ -2,7 +2,8 @@
 
 Η πρόσβαση στην εφαρμογή ελέγχεται από το Streamlit Community Cloud: η εφαρμογή είναι **Private**
 και την ανοίγουν μόνο προσκεκλημένοι χρήστες. Δεν υπάρχει εσωτερικό login, κωδικοί ή tokens·
-όλοι οι προσκεκλημένοι έχουν πρόσβαση σε όλες τις οθόνες.
+Dashboard/Scanner/Ιστορικό για όλους· οι Ρυθμίσεις (ενέργειες «admin») μόνο για χρήστες
+συνδεδεμένους με λογαριασμό Streamlit.
 
 Το Principal χρησιμοποιείται μόνο για να καταγράφεται ΠΟΙΟΣ έκανε μια ενέργεια (π.χ. μεταφορά):
 το email του προσκεκλημένου χρήστη (st.user.email στο Streamlit Cloud) ή το όνομα που δήλωσε.
@@ -31,10 +32,25 @@ class PermissionDenied(ServiceError):
     code = "forbidden"
 
 
-def authorize(principal: Principal | None, _action: str = "") -> Principal:
-    """Κάθε ενέργεια του backend απαιτεί γνωστή ταυτότητα (για το audit). Δεν υπάρχουν ρόλοι."""
+# Email που δίνει το Streamlit όταν ΔΕΝ υπάρχει πραγματικός συνδεδεμένος χρήστης.
+PLACEHOLDER_EMAILS = {"test@example.com", "example@example.com", "test@localhost.com"}
+
+
+def is_streamlit_account(email: str | None) -> bool:
+    """Ο χρήστης έχει συνδεθεί με λογαριασμό Streamlit (πραγματικό email από το Streamlit Cloud)."""
+    return bool(email and "@" in email and email.strip().lower() not in PLACEHOLDER_EMAILS)
+
+
+def authorize(principal: Principal | None, action: str = "") -> Principal:
+    """Κάθε ενέργεια του backend απαιτεί γνωστή ταυτότητα (για το audit).
+
+    Οι ενέργειες «admin» (καρτέλα Ρυθμίσεις: Excel, backups, ρυθμίσεις, ιστορικό ενεργειών, OneDrive)
+    επιτρέπονται μόνο σε χρήστη συνδεδεμένο με λογαριασμό Streamlit.
+    """
     if principal is None or not principal.name:
         raise PermissionDenied("Άγνωστος χρήστης.")
+    if action == "admin" and not is_streamlit_account(principal.email):
+        raise PermissionDenied("Οι Ρυθμίσεις είναι διαθέσιμες μόνο σε χρήστες συνδεδεμένους με λογαριασμό Streamlit.")
     return principal
 
 

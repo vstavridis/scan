@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,15 @@ playwright = pytest.importorskip("playwright.sync_api")
 pytestmark = [pytest.mark.browser, pytest.mark.slow]
 
 
+SIGNED_IN_HEADER = "X-Test-Streamlit-Email"
+ADMIN_EMAIL = "admin@warehouse.test"
+
+
+def signed_in_context(browser, **kwargs):
+    """Browser χρήστη συνδεδεμένου με λογαριασμό Streamlit (βλέπει τις Ρυθμίσεις)."""
+    return browser.new_context(extra_http_headers={SIGNED_IN_HEADER: ADMIN_EMAIL}, **kwargs)
+
+
 class StreamlitServer:
     def __init__(self, env: dict[str, str], latency_ms: int = 0):
         self.port = free_port()
@@ -38,7 +48,9 @@ class StreamlitServer:
     def start(self) -> "StreamlitServer":
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "streamlit", "run", str(ROOT / "streamlit_app.py"), "--server.port", str(self.port),
-             "--server.headless", "true", "--browser.gatherUsageStats", "false", "--server.fileWatcherType", "none"],
+             "--server.headless", "true", "--browser.gatherUsageStats", "false", "--server.fileWatcherType", "none",
+             # όπως στο Streamlit Cloud: το email του συνδεδεμένου χρήστη έρχεται από έμπιστο header
+             "--server.trustedUserHeaders", json.dumps({SIGNED_IN_HEADER: "email"})],
             cwd=ROOT, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -319,7 +331,7 @@ def test_fullscreen_and_greek_layout(browser, tmp_path, synthetic_master):
 
 def test_admin_uploads_excel_from_settings(browser, tmp_path, synthetic_master):
     with app_server(tmp_path) as srv:
-        ctx = browser.new_context(viewport={"width": 1500, "height": 1100}, accept_downloads=True)
+        ctx = signed_in_context(browser, viewport={"width": 1500, "height": 1100}, accept_downloads=True)
         page = ctx.new_page()
         open_page(page, srv.url, "", "Admin")
         page.get_by_role("link", name="Ρυθμίσεις").click()
@@ -345,7 +357,7 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
     """Καμία φόρμα σύνδεσης/κωδικός· όλες οι οθόνες ανοίγουν και λειτουργούν."""
     with app_server(tmp_path) as srv:
         activate_workbook(synthetic_master)
-        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        ctx = signed_in_context(browser, viewport={"width": 1500, "height": 1100})
         page = ctx.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -380,7 +392,7 @@ def test_app_opens_without_login_and_all_screens_work(browser, tmp_path, synthet
         page.get_by_role("button", name="Μεταφορά στα Σβησμένα").first.click()
         page.wait_for_selector("text=μεταφέρθηκε στα Σβησμένα", timeout=60000)
         log = backend.audit_log(login("admin"))
-        assert next(r for r in log if r["action"] == "transfer.queued")["actor"] == "Μαρία"
+        assert next(r for r in log if r["action"] == "transfer.queued")["actor"] == f"Μαρία <{ADMIN_EMAIL}>"
         assert not errors, errors
         ctx.close()
 
@@ -588,3 +600,41 @@ def test_dashboard_sync_button_and_no_search(browser, tmp_path, synthetic_master
         page.wait_for_selector("text=Ο συγχρονισμός ολοκληρώθηκε", timeout=30000)
         assert transfer_service.pending_count() == 0
         ctx.close()
+
+
+def test_settings_only_for_streamlit_signed_in_users(browser, tmp_path, synthetic_master):
+    """Ρυθμίσεις: ορατές μόνο σε χρήστη συνδεδεμένο με λογαριασμό Streamlit· αλλιώς ούτε στο μενού
+    ούτε από τον σύνδεσμο /settings. Οι υπόλοιπες σελίδες λειτουργούν κανονικά."""
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        guest = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = guest.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        nav = page.locator('[data-testid="stSidebarNav"]')
+        for link in ("Dashboard", "Scanner", "Ιστορικό"):
+            assert nav.get_by_role("link", name=link).count() == 1, link
+        assert nav.get_by_role("link", name="Ρυθμίσεις").count() == 0
+        assert page.locator("text=Συνδεδεμένος:").count() == 0
+        open_page(page, srv.url, "settings")                     # απευθείας σύνδεσμος
+        page.wait_for_timeout(3000)
+        assert page.locator("text=Ανέβασμα νέου Excel").count() == 0
+        assert page.locator("h1:has-text('Ρυθμίσεις')").count() == 0
+        guest.close()
+
+        member = signed_in_context(browser, viewport={"width": 1500, "height": 1100})
+        page = member.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        page.wait_for_selector(f"text={ADMIN_EMAIL}", timeout=10000)
+        page.locator('[data-testid="stSidebarNav"]').get_by_role("link", name="Ρυθμίσεις").click()
+        page.wait_for_selector("text=Ανέβασμα νέου Excel", timeout=30000)
+        member.close()
+
+    # και στο backend: ενέργειες Ρυθμίσεων χωρίς λογαριασμό Streamlit απορρίπτονται
+    from app.auth import PermissionDenied
+    for anon in (backend.identity("Αποθήκη PC1"), backend.identity("x", "test@example.com")):
+        with pytest.raises(PermissionDenied):
+            backend.imports(anon)
+        with pytest.raises(PermissionDenied):
+            backend.update_settings(anon, {"scanner_auto_fullscreen": False})

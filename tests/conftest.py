@@ -149,7 +149,8 @@ def app_env(request, tmp_path: Path) -> Iterator[Path]:
 
 def login(role: str) -> Principal:
     from app import backend
-    return backend.identity(f"test-{role}")   # χωρίς κωδικούς: μόνο ταυτότητα για το audit
+    # χωρίς κωδικούς: μόνο ταυτότητα για το audit· ο admin είναι συνδεδεμένος με λογαριασμό Streamlit
+    return backend.identity(f"test-{role}", "admin@warehouse.test" if role == "admin" else None)
 
 
 def activate_workbook(path: Path, confirm: bool = False) -> dict:
