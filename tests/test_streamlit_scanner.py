@@ -33,9 +33,9 @@ SIGNED_IN_HEADER = "X-Test-Streamlit-Email"
 ADMIN_EMAIL = "admin@warehouse.test"
 
 
-def signed_in_context(browser, **kwargs):
-    """Browser χρήστη συνδεδεμένου με λογαριασμό Streamlit (βλέπει τις Ρυθμίσεις)."""
-    return browser.new_context(extra_http_headers={SIGNED_IN_HEADER: ADMIN_EMAIL}, **kwargs)
+def signed_in_context(browser, email: str = ADMIN_EMAIL, **kwargs):
+    """Browser χρήστη συνδεδεμένου με λογαριασμό Streamlit."""
+    return browser.new_context(extra_http_headers={SIGNED_IN_HEADER: email}, **kwargs)
 
 
 class StreamlitServer:
@@ -665,4 +665,44 @@ def test_history_shows_latest_25_transfers(browser, tmp_path, synthetic_master):
         assert page.locator("text=Οι 25 πιο πρόσφατες μεταφορές").count() == 1
         newest = backend.list_transfers(sec)[0]["barcode"]
         assert page.locator(f".row-cell:text-is('{newest}')").count() == 1
+        ctx.close()
+
+
+
+def test_settings_only_for_admin_emails_from_secrets(browser, tmp_path, synthetic_master, monkeypatch):
+    """Με `[admin] emails` (εδώ APP_ADMIN_EMAILS) μόνο τα email της λίστας βλέπουν τις Ρυθμίσεις."""
+    monkeypatch.setenv("APP_ADMIN_EMAILS", ADMIN_EMAIL)
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        for email, visible in (("worker@warehouse.test", False), (ADMIN_EMAIL, True)):
+            ctx = signed_in_context(browser, email, viewport={"width": 1500, "height": 1100})
+            page = ctx.new_page()
+            open_page(page, srv.url)
+            page.wait_for_selector(f"text={email}", timeout=30000)
+            nav = page.locator('[data-testid="stSidebarNav"]')
+            assert nav.get_by_role("link", name="Ρυθμίσεις").count() == (1 if visible else 0), email
+            open_page(page, srv.url, "settings")
+            if visible:
+                page.wait_for_selector("text=Ανέβασμα νέου Excel", timeout=30000)
+                page.wait_for_selector("text=μόνο 1 email από τα Secrets", timeout=10000)
+            else:
+                page.wait_for_timeout(3000)
+                assert page.locator("text=Ανέβασμα νέου Excel").count() == 0
+            ctx.close()
+
+
+def test_cloud_toolbar_icons_hidden(browser, tmp_path, synthetic_master):
+    """Τα εικονίδια του Streamlit Cloud πάνω δεξιά (Share, αστέρι, επεξεργασία, GitHub) δεν εμφανίζονται."""
+    with app_server(tmp_path) as srv:
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        shown = page.evaluate("""() => { const h = document.querySelector('[data-testid="stHeader"]') || document.body;
+            const out = {};
+            for (const id of ['stToolbarActions', 'stToolbarActionButton', 'stAppDeployButton', 'stMainMenu']) {
+                const el = document.createElement('div'); el.setAttribute('data-testid', id); el.textContent = 'Share';
+                h.appendChild(el); out[id] = getComputedStyle(el).display; el.remove(); }
+            return out; }""")
+        assert set(shown.values()) == {"none"}, shown
         ctx.close()

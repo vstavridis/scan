@@ -101,6 +101,9 @@ div[data-testid="stDataFrame"] { border: 1px solid var(--wh-line); border-radius
 /* Χωρίς το «Running… / Stop» πάνω δεξιά σε κάθε περιοδική ανανέωση (Scanner/Dashboard/Ιστορικό).
    Οι πραγματικές ενέργειες δείχνουν δικά τους μηνύματα/spinners. */
 [data-testid="stStatusWidget"] { visibility: hidden !important; }
+/* Χωρίς τα εικονίδια του Streamlit Cloud πάνω δεξιά (Share, αστέρι, επεξεργασία, GitHub) και το μενού ⋮ */
+[data-testid="stToolbarActions"], [data-testid="stToolbarActionButton"], [data-testid="stAppDeployButton"],
+[data-testid="stMainMenu"] { display: none !important; }
 </style>
 """
 
@@ -130,6 +133,12 @@ def principal() -> Principal:
 def streamlit_signed_in() -> bool:
     """Ο χρήστης έχει συνδεθεί με λογαριασμό Streamlit (Streamlit Cloud)."""
     return _cloud_email() is not None
+
+
+def can_open_settings() -> bool:
+    """Βλέπει την καρτέλα Ρυθμίσεις: λογαριασμός Streamlit + (αν οριστεί) email στο `[admin] emails`."""
+    from app.auth import can_manage
+    return can_manage(_cloud_email())
 
 
 def require(_permission: str = "") -> bool:

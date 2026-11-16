@@ -63,10 +63,10 @@ except Exception as exc:  # pragma: no cover - εμφανίζεται στον �
     st.error(f"Δεν ήταν δυνατή η εκκίνηση: {type(exc).__name__}")
     st.stop()
 
-from app.ui.common import inject_css, streamlit_signed_in, user_sidebar  # noqa: E402
+from app.ui.common import can_open_settings, inject_css, user_sidebar  # noqa: E402
 from app.ui.views import dashboard, history, scanner, settings  # noqa: E402
 
-if "code" in st.query_params and "state" in st.query_params and streamlit_signed_in():
+if "code" in st.query_params and "state" in st.query_params and can_open_settings():
     from app.services import onedrive
     try:
         account = onedrive.finish_authorization(str(st.query_params["code"]), str(st.query_params["state"]))
@@ -75,7 +75,7 @@ if "code" in st.query_params and "state" in st.query_params and streamlit_signed
         st.session_state["onedrive_auth_message"] = "Η σύνδεση Microsoft απέτυχε. Δοκιμάστε ξανά από τις Ρυθμίσεις."
     st.query_params.clear()
     st.rerun()
-elif "error" in st.query_params and "state" in st.query_params and streamlit_signed_in():
+elif "error" in st.query_params and "state" in st.query_params and can_open_settings():
     st.session_state["onedrive_auth_message"] = "Η Microsoft δεν έδωσε άδεια σύνδεσης."
     st.query_params.clear()
     st.rerun()
@@ -86,13 +86,14 @@ if st.session_state.pop("onedrive_auth_message", None):
     st.info("Η Microsoft επέστρεψε στην εφαρμογή. Δείτε την ενότητα OneDrive στις Ρυθμίσεις.")
 
 # Dashboard, Scanner, Ιστορικό: για όλους. Ρυθμίσεις: μόνο για χρήστες συνδεδεμένους με λογαριασμό
-# Streamlit (Streamlit Cloud). Χωρίς σύνδεση η σελίδα δεν υπάρχει καν στο μενού ούτε στο /settings.
+# Streamlit και, αν έχει οριστεί `[admin] emails` στα Secrets, μόνο για αυτά τα email.
+# Για τους υπόλοιπους η σελίδα δεν υπάρχει καν στο μενού ούτε στο /settings.
 pages = [
     st.Page(dashboard.page, title="Dashboard", icon="📊", url_path="dashboard", default=True),
     st.Page(scanner.page, title="Scanner", icon="📟", url_path="scanner"),
     st.Page(history.page, title="Ιστορικό", icon="🗂️", url_path="history"),
 ]
-if streamlit_signed_in():
+if can_open_settings():
     pages.append(st.Page(settings.page, title="Ρυθμίσεις", icon="⚙️", url_path="settings"))
 nav = st.navigation(pages)
 try:

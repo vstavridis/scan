@@ -4,6 +4,7 @@
 
     [database]   url            -> Supabase PostgreSQL (connection string, pooler)
     [supabase]   url, service_key, bucket  -> Supabase Storage (private bucket)
+    [admin]      emails         -> (προαιρετικό) ποιοι βλέπουν την καρτέλα Ρυθμίσεις
 
 Πρόσβαση χρηστών: Private app στο Streamlit Cloud (μόνο προσκεκλημένοι) — χωρίς εσωτερικό login.
 
@@ -66,6 +67,8 @@ class Settings:
     onedrive_client_id: str | None = None
     onedrive_client_secret: str | None = None
     onedrive_redirect_uri: str | None = None
+    # ποιοι βλέπουν τις Ρυθμίσεις (κενό = κάθε χρήστης συνδεδεμένος με λογαριασμό Streamlit)
+    admin_emails: frozenset[str] = frozenset()
     # λοιπά
     timezone: str = "Europe/Athens"
     source_sheet: str = DEFAULT_SOURCE_SHEET
@@ -89,6 +92,14 @@ class Settings:
         return out
 
 
+def _email_list(value: Any) -> frozenset[str]:
+    """Λίστα email από Secrets (["a@x.gr", "b@x.gr"]) ή κείμενο χωρισμένο με κόμμα/κενά."""
+    if value is None:
+        return frozenset()
+    items = value if isinstance(value, (list, tuple, set, frozenset)) else str(value).replace(";", ",").replace(" ", ",").split(",")
+    return frozenset(str(e).strip().lower() for e in items if "@" in str(e))
+
+
 def load_settings() -> Settings:
     sec = _secrets()
     sqlite = _get(sec, "dev", "sqlite_path", "APP_DEV_SQLITE")
@@ -103,6 +114,7 @@ def load_settings() -> Settings:
         onedrive_client_id=_get(sec, "onedrive", "client_id", "APP_ONEDRIVE_CLIENT_ID"),
         onedrive_client_secret=_get(sec, "onedrive", "client_secret", "APP_ONEDRIVE_CLIENT_SECRET"),
         onedrive_redirect_uri=_get(sec, "onedrive", "redirect_uri", "APP_ONEDRIVE_REDIRECT_URI"),
+        admin_emails=_email_list(_get(sec, "admin", "emails", "APP_ADMIN_EMAILS")),
         timezone=_get(sec, "app", "timezone", "APP_TIMEZONE", "Europe/Athens"),
         source_sheet=_get(sec, "app", "source_sheet", "APP_SOURCE_SHEET", DEFAULT_SOURCE_SHEET),
         target_sheet=_get(sec, "app", "target_sheet", "APP_TARGET_SHEET", DEFAULT_TARGET_SHEET),

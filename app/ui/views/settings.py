@@ -7,7 +7,7 @@ import streamlit as st
 from app.timeutil import fmt_local
 from app import backend
 from app.services.errors import ServiceError
-from app.ui.common import principal, require, show_error, streamlit_signed_in
+from app.ui.common import can_open_settings, principal, require, show_error
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -355,10 +355,17 @@ def _sync_panel() -> None:
 def page() -> None:
     if not require("admin"):
         return
-    if not streamlit_signed_in():   # δεύτερος έλεγχος, πέρα από το μενού
-        st.error("Οι Ρυθμίσεις είναι διαθέσιμες μόνο σε χρήστες συνδεδεμένους με λογαριασμό Streamlit.")
+    if not can_open_settings():   # δεύτερος έλεγχος, πέρα από το μενού
+        st.error("Δεν έχετε πρόσβαση στις Ρυθμίσεις.")
         return
     st.title("Ρυθμίσεις")
+    from app.config import get_settings
+    admins = get_settings().admin_emails
+    if admins:
+        st.caption(f"Πρόσβαση στις Ρυθμίσεις: μόνο {len(admins)} email από τα Secrets (`[admin] emails`).")
+    else:
+        st.warning("Δεν έχει οριστεί `[admin] emails` στα Streamlit Secrets: τις Ρυθμίσεις τις βλέπει κάθε "
+                   "χρήστης συνδεδεμένος με λογαριασμό Streamlit. Προσθέστε τη λίστα για να τις περιορίσετε.")
     p = principal()
     try:
         health = backend.health()

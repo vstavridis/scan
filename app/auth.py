@@ -41,6 +41,16 @@ def is_streamlit_account(email: str | None) -> bool:
     return bool(email and "@" in email and email.strip().lower() not in PLACEHOLDER_EMAILS)
 
 
+def can_manage(email: str | None) -> bool:
+    """Δικαίωμα στις Ρυθμίσεις: λογαριασμός Streamlit και, αν έχει οριστεί `[admin] emails` στα Secrets,
+    email μέσα σε αυτή τη λίστα (χωρίς διάκριση πεζών/κεφαλαίων)."""
+    if not is_streamlit_account(email):
+        return False
+    from app.config import get_settings
+    allowed = get_settings().admin_emails
+    return not allowed or str(email).strip().lower() in allowed
+
+
 def authorize(principal: Principal | None, action: str = "") -> Principal:
     """Κάθε ενέργεια του backend απαιτεί γνωστή ταυτότητα (για το audit).
 
@@ -49,8 +59,8 @@ def authorize(principal: Principal | None, action: str = "") -> Principal:
     """
     if principal is None or not principal.name:
         raise PermissionDenied("Άγνωστος χρήστης.")
-    if action == "admin" and not is_streamlit_account(principal.email):
-        raise PermissionDenied("Οι Ρυθμίσεις είναι διαθέσιμες μόνο σε χρήστες συνδεδεμένους με λογαριασμό Streamlit.")
+    if action == "admin" and not can_manage(principal.email):
+        raise PermissionDenied("Δεν έχετε πρόσβαση στις Ρυθμίσεις.")
     return principal
 
 
