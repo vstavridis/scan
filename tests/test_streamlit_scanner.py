@@ -562,3 +562,29 @@ def test_scanner_page_opens_fullscreen_but_dashboard_does_not(browser, tmp_path,
         assert page.evaluate("!document.fullscreenElement && "
                              "!document.querySelector('.whs-root').classList.contains('whs-kiosk')")
         ctx.close()
+
+
+def test_dashboard_sync_button_and_no_search(browser, tmp_path, synthetic_master):
+    """Dashboard: χωρίς πεδίο αναζήτησης· «Συγχρονισμός τώρα» στο τέλος της Αναλυτικής λίστας."""
+    from app.services import transfer as transfer_service
+    with app_server(tmp_path) as srv:
+        activate_workbook(synthetic_master)
+        scan(login("scanner"), "VS11486", "VS11487")
+        backend.queue_transfers(login("secretary"), [
+            next(i["id"] for i in backend.dashboard(login("secretary"))["items"] if i["barcode"] == "VS11486")])
+        ctx = browser.new_context(viewport={"width": 1500, "height": 1100})
+        page = ctx.new_page()
+        open_page(page, srv.url)
+        page.wait_for_selector("text=Dashboard — Ζωντανή εικόνα", timeout=30000)
+        assert page.locator("text=Αναζήτηση (barcode").count() == 0
+        assert page.locator('[data-testid="stTextInput"]').count() == 0
+        page.get_by_role("tab", name="Αναλυτική λίστα").click()
+        btn = page.get_by_role("button", name="🔄 Συγχρονισμός τώρα")
+        btn.wait_for(timeout=10000)
+        # στο τέλος της λίστας: κάτω από την τελευταία γραμμή
+        last_row = page.get_by_role("button", name="Μεταφορά στα Σβησμένα").last.bounding_box()
+        assert btn.bounding_box()["y"] > last_row["y"]
+        btn.click()
+        page.wait_for_selector("text=Ο συγχρονισμός ολοκληρώθηκε", timeout=30000)
+        assert transfer_service.pending_count() == 0
+        ctx.close()

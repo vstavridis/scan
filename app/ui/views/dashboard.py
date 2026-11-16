@@ -8,21 +8,13 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from app.services.normalize import format_kilos, normalize_text, parse_kilos
+from app.services.normalize import format_kilos, parse_kilos
 from app.timeutil import fmt_local
 from app import backend
 from app.services.errors import ServiceError
 from app.ui.common import principal, require, show_error
 
 PAGE_SIZE = 40
-
-
-def _matches(item: dict[str, Any], term: str) -> bool:
-    if not term:
-        return True
-    t = normalize_text(term)
-    hay = " ".join(str(item.get(k) or "") for k in ("barcode", "eidos", "pelatis", "diastaseis"))
-    return t in normalize_text(hay) or term.strip().upper() in hay.upper()
 
 
 FLASH_SECONDS = 20
@@ -98,9 +90,7 @@ def _metrics(totals: dict[str, Any]) -> None:
     c[4].metric("Άγνωστα / αμφίσημα", f"{totals['unknown']} / {totals['ambiguous']}")
 
 
-def _groups_tab(groups: list[dict[str, Any]], items_by_id: dict[int, dict[str, Any]], term: str) -> None:
-    if term:
-        groups = [g for g in groups if any(_matches(items_by_id[b["id"]], term) for b in g["barcodes"])]
+def _groups_tab(groups: list[dict[str, Any]]) -> None:
     if not groups:
         st.info("Δεν υπάρχουν ενεργά προϊόντα για ομαδοποίηση.")
         return
@@ -168,8 +158,27 @@ def _selection_bar(rows: list[dict[str, Any]], chunk: list[dict[str, Any]]) -> N
             st.rerun(scope="fragment")
 
 
-def _detail_tab(items: list[dict[str, Any]], term: str) -> None:
-    rows = [i for i in items if _matches(i, term)]
+def _sync_button() -> None:
+    """Ίδιο με το «Συγχρονισμός τώρα» του Ιστορικού: Excel (Supabase) και OneDrive."""
+    st.markdown("")
+    if st.button("🔄 Συγχρονισμός τώρα", key="dash_sync_now",
+                 help="Ενημέρωση του Excel και του online Excel (OneDrive) τώρα, χωρίς αναμονή"):
+        with st.spinner("Συγχρονισμός Excel…"):
+            try:
+                out = backend.sync_now(principal())
+                n = len(out.get("completed") or [])
+                _flash("success", f"✔ Ο συγχρονισμός ολοκληρώθηκε ({n} ενέργειες στο Excel)."
+                       if n else "✔ Ο συγχρονισμός ολοκληρώθηκε· το Excel είναι ενημερωμένο.")
+                if out.get("onedrive_warning"):
+                    _flash("warning", "⚠ " + out["onedrive_warning"])
+            except ServiceError as exc:
+                _flash("error", f"✖ {exc.message}")
+        _invalidate()
+        st.rerun(scope="fragment")
+
+
+def _detail_tab(items: list[dict[str, Any]]) -> None:
+    rows = items
     if not rows:
         st.info("Δεν υπάρχουν εγγραφές.")
         return
@@ -266,7 +275,6 @@ def page() -> None:
     if not require("dashboard"):
         return
     st.title("Dashboard — Ζωντανή εικόνα")
-    term = st.text_input("🔎 Αναζήτηση (barcode, είδος ή πελάτης)", key="dash_search", placeholder="π.χ. VS114 ή ΑΠΟΘΗΚΗ")
     try:
         configured_refresh = float(backend.public_config()["dashboard_refresh_seconds"])
     except Exception:
@@ -317,13 +325,13 @@ def page() -> None:
                        "λίγο ώστε να ενημερωθεί. Λεπτομέρειες: Ιστορικό → Συγχρονισμός." + reason)
         _metrics(data["totals"])
         items = data["items"]
-        items_by_id = {i["id"]: i for i in items}
         tab_sum, tab_list, tab_review = st.tabs(
             ["Συγκεντρωτικά (SUM)", "Αναλυτική λίστα", "Προς έλεγχο"], key="dash_tabs", on_change="rerun")
         with tab_sum:
-            _groups_tab(data["groups"], items_by_id, term)
+            _groups_tab(data["groups"])
         with tab_list:
-            _detail_tab(items, term)
+            _detail_tab(items)
+            _sync_button()
         with tab_review:
             n = data["totals"]["problem"]
             if n:
