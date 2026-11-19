@@ -35,7 +35,7 @@ from app.services.audit import audit
 from app.services.catalog import EXCEL_LOCK, working_object
 from app.services.errors import Conflict, NotFound, ServiceError
 from app.services.locks import lease
-from app.services.normalize import format_kilos, normalize_barcode, parse_kilos
+from app.services.normalize import barcode_variants as normalize_barcode_variants, format_kilos, normalize_barcode, parse_kilos
 from app.storage import StorageError, cached_get, get_store
 from app.timeutil import utcnow, utcnow_iso
 
@@ -521,9 +521,11 @@ def resolve_ambiguous(item_id: int, product_record_id: int, actor: str) -> dict[
         it = _load_item(conn, item_id)
         if it["status"] != "active" or it["state"] != "ambiguous":
             raise Conflict("Η εγγραφή δεν είναι αμφίσημη ή δεν είναι πλέον ενεργή.")
+        allowed = [it["barcode_norm"], *normalize_barcode_variants(it["barcode_norm"])]
         prod = conn.execute(
-            "SELECT * FROM product_records WHERE id=? AND barcode_norm=? AND status='available'",
-            (product_record_id, it["barcode_norm"]),
+            "SELECT * FROM product_records WHERE id=? AND status='available' "
+            f"AND barcode_norm IN ({','.join('?' * len(allowed))})",
+            (product_record_id, *allowed),
         ).fetchone()
         imp = conn.execute("SELECT id FROM excel_imports WHERE is_active=1").fetchone()
         if prod is None or imp is None or prod["import_id"] != imp["id"]:
