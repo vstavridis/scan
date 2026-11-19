@@ -25,7 +25,6 @@ from app.excel.reader import ValidationReport, validate_workbook
 from app.services.audit import audit
 from app.services.errors import ConfirmationRequired, NotFound, ServiceError
 from app.services.locks import lease
-from app.services.normalize import barcode_variants
 from app.storage import StorageError, cached_get, get_store, sha256_bytes
 from app.timeutil import local_stamp, utcnow_iso
 
@@ -227,25 +226,10 @@ def _remap_active_items(conn: Conn, import_id: int) -> dict[str, int]:
 
 # --------------------------------------------------------------------------- lookups
 def lookup(conn: Conn, import_id: int, barcode_norm: str, include_transferred: bool = False) -> list[Any]:
-    """Προϊόντα με αυτό το barcode. Αν ΔΕΝ υπάρχει κανένα προϊόν με την ακριβή γραφή (σε καμία
-    κατάσταση), δοκιμάζονται οι γραφές με άλλα μηδενικά μπροστά στον αριθμό (PG7052 ~ PG07052)."""
     sql = "SELECT * FROM product_records WHERE import_id=? AND barcode_norm=?"
     if not include_transferred:
         sql += " AND status='available'"
-    rows = conn.execute(sql + " ORDER BY sheet_row", (import_id, barcode_norm)).fetchall()
-    if rows:
-        return rows
-    variants = barcode_variants(barcode_norm)
-    if not variants or exact_exists(conn, import_id, barcode_norm):
-        return rows
-    vsql = (f"SELECT * FROM product_records WHERE import_id=? AND barcode_norm IN ({','.join('?' * len(variants))})"
-            + ("" if include_transferred else " AND status='available'"))
-    return conn.execute(vsql + " ORDER BY sheet_row", (import_id, *variants)).fetchall()
-
-
-def exact_exists(conn: Conn, import_id: int, barcode_norm: str) -> bool:
-    return conn.execute("SELECT 1 AS x FROM product_records WHERE import_id=? AND barcode_norm=? LIMIT 1",
-                        (import_id, barcode_norm)).fetchone() is not None
+    return conn.execute(sql + " ORDER BY sheet_row", (import_id, barcode_norm)).fetchall()
 
 
 def product_dict(row: Any) -> dict[str, Any] | None:

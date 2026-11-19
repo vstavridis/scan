@@ -30,25 +30,6 @@ def normalize_barcode(value: str | None) -> str:
     return s.upper()
 
 
-_CODE_RE = re.compile(r"^([A-Z]+)(\d+)$")
-MAX_CODE_DIGITS = 8     # γραφές έως 8 ψηφία: PG7052 ~ PG07052 ~ ... ~ PG00007052
-
-
-def barcode_variants(barcode_norm: str) -> list[str]:
-    """Ισοδύναμες γραφές ίδιου κωδικού με διαφορετικά μηδενικά μπροστά στον αριθμό.
-
-    Στο Excel συνυπάρχουν π.χ. «PG3543» (4 ψηφία) και «PG02237» (5 ψηφία με μηδενικό), ενώ η πινακίδα
-    μπορεί να γράφει «PG7052» για το «PG07052» του Excel. Επιστρέφει τις ΑΛΛΕΣ γραφές (όχι την ίδια).
-    """
-    m = _CODE_RE.match(barcode_norm or "")
-    if not m:
-        return []
-    prefix, digits = m.groups()
-    core = digits.lstrip("0") or "0"
-    out = [prefix + "0" * pad + core for pad in range(max(MAX_CODE_DIGITS, len(digits)) - len(core) + 1)]
-    return [v for v in dict.fromkeys(out) if v != barcode_norm]
-
-
 def _strip_accents(s: str) -> str:
     decomposed = unicodedata.normalize("NFD", s)
     return unicodedata.normalize("NFC", "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn"))

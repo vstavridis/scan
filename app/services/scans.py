@@ -15,7 +15,7 @@ from typing import Any
 
 from app.db.database import Conn, bump_version, connect, get_version, transaction
 from app.services import catalog
-from app.services.normalize import barcode_variants, normalize_barcode, product_display
+from app.services.normalize import normalize_barcode, product_display
 from app.timeutil import utcnow_iso
 
 log = logging.getLogger(__name__)
@@ -88,11 +88,9 @@ def process_batch(events: list[ScanIn], device_id: str | None = None) -> dict[st
                 f"SELECT id, barcode_norm, product_record_id FROM active_items WHERE status='active' "
                 f"AND barcode_norm IN ({_marks(len(norms))})", norms).fetchall():
                 active[r["barcode_norm"]] = dict(r)
-            # + ισοδύναμες γραφές με άλλα μηδενικά (PG7052 ~ PG07052), για όταν δεν υπάρχει η ακριβής
-            wanted = sorted(set(norms) | {v for n in norms for v in barcode_variants(n)})
             for r in conn.execute(
-                f"SELECT * FROM product_records WHERE import_id=? AND barcode_norm IN ({_marks(len(wanted))}) "
-                f"ORDER BY sheet_row", [import_id, *wanted]).fetchall():
+                f"SELECT * FROM product_records WHERE import_id=? AND barcode_norm IN ({_marks(len(norms))}) "
+                f"ORDER BY sheet_row", [import_id, *norms]).fetchall():
                 products.setdefault(r["barcode_norm"], []).append(r)
         by_id = {r["id"]: r for rows in products.values() for r in rows}
 
@@ -128,15 +126,9 @@ def process_batch(events: list[ScanIn], device_id: str | None = None) -> dict[st
                 dup_inc[("new", norm)] = dup_inc.get(("new", norm), 0) + 1
             else:
                 rows = products.get(norm, [])
-                if not rows:
-                    # Καμία γραμμή με την ακριβή γραφή: δοκιμή χωρίς/με μηδενικά (PG7052 -> PG07052)
-                    rows = [r for v in barcode_variants(norm) for r in products.get(v, [])]
                 available = [r for r in rows if r["status"] == "available"]
                 if len(available) == 1:
-                    found_as = available[0]["barcode_norm"]
-                    plan.update(result="ok", product_id=available[0]["id"],
-                                message=MESSAGES["ok"] if found_as == norm
-                                else f"{MESSAGES['ok']} (στο Excel ως {available[0]['barcode']})")
+                    plan.update(result="ok", message=MESSAGES["ok"], product_id=available[0]["id"])
                 elif len(available) > 1:
                     plan.update(result="ambiguous", message=MESSAGES["ambiguous"])
                 else:
