@@ -32,6 +32,8 @@ from app.timeutil import utcnow_iso
 
 log = logging.getLogger(__name__)
 QUEUE_JOURNAL = "onedrive.outbox"
+PULLED_KEY = "onedrive.pulled_at"        # τελευταίος έλεγχος για αλλαγές στο online Excel
+PULL_ERROR_KEY = "onedrive.pull_error"   # γιατί δεν διαβάστηκαν αλλαγές του online Excel
 MAX_BATCH_OPS = 2000
 
 
@@ -220,8 +222,18 @@ def _save_journal(record: dict) -> None:
 
 
 def _adopt(imp: dict, b: dict, online: bytes, meta: dict, record: dict,
-           actor: str) -> dict:
-    """New version + synced binding + audit, committed atomically."""
+           actor: str, products: list | None = None) -> dict:
+    """New version + synced binding + audit, committed atomically.
+
+    Ο κατάλογος προϊόντων ενημερώνεται στο ίδιο transaction από το online αρχείο, ώστε προϊόντα που
+    πρόσθεσε άλλος χρήστης στο Excel Online να σκανάρονται αμέσως.
+    """
+    product_error = None
+    if products is None:
+        try:
+            products = catalog.products_from_bytes(online)
+        except ServiceError as exc:
+            products, product_error = None, exc.message
     version = int(imp["working_version"]) + 1
     destination = (f"imports/{int(imp['id']):05d}/working/"
                    f"v{version:05d}_onedrive_{uuid.uuid4().hex}.xlsx")
@@ -252,16 +264,72 @@ def _adopt(imp: dict, b: dict, online: bytes, meta: dict, record: dict,
                    (json.dumps(new_binding, ensure_ascii=False), onedrive.BOUND_KEY))
         db.execute("DELETE FROM app_settings WHERE key=?", (QUEUE_JOURNAL,))
         db.execute("DELETE FROM app_settings WHERE key=?", (onedrive.ERROR_KEY,))
+        refreshed = catalog.refresh_products(db, int(imp["id"]), products) if products is not None else None
+        _set(db, PULLED_KEY, utcnow_iso())
+        if product_error:
+            _set(db, PULL_ERROR_KEY, {"at": utcnow_iso(), "error": product_error[:500]})
+        else:
+            db.execute("DELETE FROM app_settings WHERE key=?", (PULL_ERROR_KEY,))
         # Legacy one-operation reconciliation journal, if any, is superseded.
         db.execute("DELETE FROM app_settings WHERE key=?", ("onedrive.reconciliation",))
-        audit(db, actor, "onedrive.outbox_synced", {
+        audit(db, actor, "onedrive.pulled" if record.get("pulled") else "onedrive.outbox_synced", {
+            "catalog": refreshed,
             "import_id": imp["id"], "new_version": version,
             "backup": record["backup_obj"], "operations": record["op_ids"],
             "merged_with_online_edits": bool(record.get("merged")),
         })
         bump_version(db)
-    return {"synced": True, "version": version,
+    return {"synced": True, "version": version, "catalog": refreshed,
             "operations": len(record["op_ids"]), "backup": record["backup_obj"]}
+
+
+def _set(db, key: str, value) -> None:
+    db.execute("INSERT INTO app_settings(key,value) VALUES (?,?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=False)))
+
+
+def pull_under_lease(actor: str = "onedrive-pull") -> dict:
+    """Φέρνει στην εφαρμογή αλλαγές που έγιναν απευθείας στο online Excel (π.χ. νέα προϊόντα).
+
+    Μόνο όταν δεν εκκρεμούν μεταφορές προς το OneDrive (αυτές τις χειρίζεται το flush, που επίσης
+    υιοθετεί το online αρχείο). Πρώτα φθηνός έλεγχος eTag· αν άλλαξε, λήψη και σύγκριση κελιών· αν
+    διαφέρουν, το online αρχείο γίνεται νέα έκδοση στο Supabase και ενημερώνεται ο κατάλογος.
+    """
+    imp = catalog.active_import()
+    if not imp:
+        return {"changed": False}
+    b = onedrive.bound_import(int(imp["id"]))
+    if not b or int(b["synced_version"]) != int(imp["working_version"]):
+        return {"changed": False}
+    token = onedrive._access_token()
+    meta = onedrive.file_metadata(b["drive_id"], b["item_id"], token)
+    if meta.get("eTag") and meta.get("eTag") == b.get("etag"):
+        with transaction() as db:
+            _set(db, PULLED_KEY, utcnow_iso())
+        return {"changed": False}
+    remote, meta = onedrive._stable_download(b["drive_id"], b["item_id"], token)
+    current = cached_get(imp["working_object"], imp["working_sha256"]).read_bytes()
+    if _same_cells(remote, current):
+        # μόνο νέο eTag (π.χ. αυτόματη αποθήκευση του Excel Online χωρίς αλλαγές κελιών)
+        with transaction() as db:
+            row = db.execute("SELECT value FROM app_settings WHERE key=?", (onedrive.BOUND_KEY,)).fetchone()
+            latest = json.loads(row["value"]) if row else None
+            if latest and int(latest["synced_version"]) == int(b["synced_version"]):
+                latest["etag"] = meta["eTag"]
+                db.execute("UPDATE app_settings SET value=? WHERE key=?",
+                           (json.dumps(latest, ensure_ascii=False), onedrive.BOUND_KEY))
+            _set(db, PULLED_KEY, utcnow_iso())
+        return {"changed": False}
+    products = catalog.products_from_bytes(remote)   # λάθος μορφή -> δεν υιοθετείται τίποτα
+    record = {"op_ids": [], "backup_obj": imp["working_object"], "pulled": True}
+    out = _adopt(imp, b, remote, meta, record, actor, products)
+    out["changed"] = True
+    return out
+
+
+def pull(actor: str = "onedrive-pull") -> dict:
+    with lease(catalog.EXCEL_LOCK, busy_message="Άλλη ενέργεια Excel είναι σε εξέλιξη."):
+        return pull_under_lease(actor)
 
 
 def flush_under_lease(actor: str = "onedrive-mirror") -> dict:

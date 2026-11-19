@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS product_records (
     extra_json    TEXT,
     fingerprint   TEXT    NOT NULL,
     group_key     TEXT    NOT NULL,
-    status        TEXT    NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'transferred')),
+    status        TEXT    NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'transferred', 'removed')),
     transferred_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_products_lookup ON product_records(import_id, barcode_norm);
@@ -212,6 +212,13 @@ BEGIN
         ALTER TABLE transfer_operations ADD CONSTRAINT transfer_operations_kind_check
             CHECK (kind IN ('transfer', 'restore'));
     END IF;
+    -- v4: 'removed' = η γραμμή δεν υπάρχει πια στο online Excel (σβήστηκε ή άλλαξε από άλλον χρήστη)
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'product_records_status_check'
+                   AND pg_get_constraintdef(oid) LIKE '%removed%') THEN
+        ALTER TABLE product_records DROP CONSTRAINT IF EXISTS product_records_status_check;
+        ALTER TABLE product_records ADD CONSTRAINT product_records_status_check
+            CHECK (status IN ('available', 'transferred', 'removed'));
+    END IF;
 END $$;
 -- Μία ενεργή μεταφορά ανά προϊόν (μια επαναφορά "ελευθερώνει" το προϊόν για νέα μεταφορά).
 DROP INDEX IF EXISTS ux_transfer_once;
@@ -241,7 +248,7 @@ BEGIN
     END LOOP;
 END $$;
 
-INSERT INTO schema_meta(key, value) VALUES ('schema_version', '3')
+INSERT INTO schema_meta(key, value) VALUES ('schema_version', '4')
 ON CONFLICT (key) DO UPDATE SET value = excluded.value;
 INSERT INTO app_settings(key, value) VALUES ('data_version', '0') ON CONFLICT (key) DO NOTHING;
 

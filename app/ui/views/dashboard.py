@@ -169,6 +169,10 @@ def _sync_button() -> None:
                 n = len(out.get("completed") or [])
                 _flash("success", f"✔ Ο συγχρονισμός ολοκληρώθηκε ({n} ενέργειες στο Excel)."
                        if n else "✔ Ο συγχρονισμός ολοκληρώθηκε· το Excel είναι ενημερωμένο.")
+                cat = out.get("catalog")
+                if cat and (cat.get("added") or cat.get("removed") or cat.get("found")):
+                    _flash("info", f"Από το online Excel: {cat['added']} νέα προϊόντα, {cat['removed']} "
+                                   f"αφαιρέθηκαν, {cat['found']} barcode της λίστας βρέθηκαν τώρα.")
                 if out.get("onedrive_warning"):
                     _flash("warning", "⚠ " + out["onedrive_warning"])
             except ServiceError as exc:

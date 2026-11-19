@@ -331,6 +331,12 @@ def _sync_panel() -> None:
         else:
             st.success(f"✔ Το online Excel «{od.get('name') or ''}» είναι ενημερωμένο ({synced}).")
         st.caption(f"Τελευταίος επιτυχής συγχρονισμός OneDrive: {when}")
+        pulled = fmt_local(s["onedrive_pulled_at"]) if s.get("onedrive_pulled_at") else "—"
+        st.caption(f"Τελευταίος έλεγχος για νέα/αλλαγμένα προϊόντα στο online Excel: {pulled} "
+                   "(αυτόματα κάθε λεπτό)")
+        if s.get("onedrive_pull_error"):
+            st.warning(f"Δεν διαβάστηκαν οι αλλαγές του online Excel ({fmt_local(s['onedrive_pull_error']['at'])}): "
+                       f"{s['onedrive_pull_error']['error']}")
         if od.get("link"):
             st.link_button("Άνοιγμα online Excel", od["link"])
 
@@ -346,6 +352,10 @@ def _sync_panel() -> None:
             try:
                 out = backend.sync_now(principal())
                 st.success(f"Ολοκληρώθηκαν {len(out.get('completed') or [])} ενέργειες.")
+                cat = out.get("catalog")
+                if cat and (cat.get("added") or cat.get("removed") or cat.get("found")):
+                    st.info(f"Από το online Excel: {cat['added']} νέα προϊόντα, {cat['removed']} αφαιρέθηκαν, "
+                            f"{cat['found']} barcode της λίστας βρέθηκαν τώρα.")
                 if out.get("onedrive_warning"):
                     st.warning(out["onedrive_warning"])
             except ServiceError as exc:

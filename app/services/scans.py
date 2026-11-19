@@ -89,8 +89,8 @@ def process_batch(events: list[ScanIn], device_id: str | None = None) -> dict[st
                 f"AND barcode_norm IN ({_marks(len(norms))})", norms).fetchall():
                 active[r["barcode_norm"]] = dict(r)
             for r in conn.execute(
-                f"SELECT * FROM product_records WHERE import_id=? AND barcode_norm IN ({_marks(len(norms))}) "
-                f"ORDER BY sheet_row", [import_id, *norms]).fetchall():
+                f"SELECT * FROM product_records WHERE import_id=? AND status<>'removed' "
+                f"AND barcode_norm IN ({_marks(len(norms))}) ORDER BY sheet_row", [import_id, *norms]).fetchall():
                 products.setdefault(r["barcode_norm"], []).append(r)
         by_id = {r["id"]: r for rows in products.values() for r in rows}
 

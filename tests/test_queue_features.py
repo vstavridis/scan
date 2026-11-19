@@ -269,7 +269,10 @@ def test_schema_upgrade_from_v2_keeps_transfers():
             c.execute(new)                                                  # idempotent
             row = c.execute("SELECT kind, status, reverted_at FROM transfer_operations").fetchone()
             assert row == ("transfer", "completed", None)
-            assert c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+            assert c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
+            check = c.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                              "WHERE conname='product_records_status_check'").fetchone()[0]
+            assert "removed" in check                                        # v4: προϊόν που σβήστηκε online
             c.execute("INSERT INTO transfer_operations(product_record_id, import_id, barcode, fingerprint, status, kind, "
                       "requested_by, started_at) VALUES (2, 1, 'VS2', 'f', 'queued', 'transfer', 'x', '2026-01-01')")
             with pytest.raises(psycopg.errors.CheckViolation):

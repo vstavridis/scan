@@ -166,18 +166,7 @@ def activate(staging_id: str, actor: str, confirm_replace: bool = False, *,
             )
             conn.execute("UPDATE excel_imports SET is_active=0 WHERE is_active=1")
             conn.execute("UPDATE excel_imports SET is_active=1 WHERE id=?", (import_id,))
-            conn.executemany(
-                """INSERT INTO product_records(import_id, sheet_row, barcode, barcode_norm, eidos, paxos, diastaseis,
-                       temaxia, kila, pelatis, vspg, topothesia, thesi, rolo, extra_json, fingerprint, group_key)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    (import_id, p.sheet_row, p.barcode, p.barcode_norm, p.values["eidos"], p.values["paxos"],
-                     p.values["diastaseis"], p.values["temaxia"], p.values["kila"], p.values["pelatis"],
-                     p.values["vspg"], p.values["topothesia"], p.values["thesi"], p.values["rolo"],
-                     json.dumps(p.extra, ensure_ascii=False), p.fingerprint, p.group_key)
-                    for p in report.products
-                ],
-            )
+            _insert_products(conn, import_id, report.products)
             remapped = _remap_active_items(conn, import_id)
             if onedrive_binding is not None:
                 # Atomic with the active import pointer, product records and staged deletion.
@@ -204,6 +193,84 @@ def activate(staging_id: str, actor: str, confirm_replace: bool = False, *,
     log.info("Activated import %s (%s)", import_id, staged["filename"])
     return {"import_id": import_id, "filename": staged["filename"], "report": report.summary(), "backups": backups,
             "remapped": remapped}
+
+
+def _insert_products(conn: Conn, import_id: int, products: list[Any]) -> None:
+    if not products:
+        return
+    conn.executemany(
+        """INSERT INTO product_records(import_id, sheet_row, barcode, barcode_norm, eidos, paxos, diastaseis,
+               temaxia, kila, pelatis, vspg, topothesia, thesi, rolo, extra_json, fingerprint, group_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            (import_id, p.sheet_row, p.barcode, p.barcode_norm, p.values["eidos"], p.values["paxos"],
+             p.values["diastaseis"], p.values["temaxia"], p.values["kila"], p.values["pelatis"],
+             p.values["vspg"], p.values["topothesia"], p.values["thesi"], p.values["rolo"],
+             json.dumps(p.extra, ensure_ascii=False), p.fingerprint, p.group_key)
+            for p in products
+        ],
+    )
+
+
+def products_from_bytes(data: bytes) -> list[Any]:
+    """Γραμμές προϊόντων του «΄Ετοιμα προϊόντα» από ένα Excel (με έλεγχο μορφής όπως στην εισαγωγή)."""
+    report = _validate_bytes(data)
+    if not report.ok:
+        raise ServiceError("Το online Excel δεν έχει τη σωστή μορφή: " + "; ".join(report.errors[:3]))
+    return list(report.products)
+
+
+def refresh_products(conn: Conn, import_id: int, products: list[Any]) -> dict[str, int]:
+    """Ενημερώνει τον κατάλογο προϊόντων από νεότερη έκδοση του ίδιου Excel (π.χ. αλλαγές στο Excel Online).
+
+    * νέες γραμμές (π.χ. προϊόν που προστέθηκε online) -> νέα διαθέσιμα προϊόντα
+    * ίδιες γραμμές (ίδιο barcode + ίδια στοιχεία) -> κρατούν την ταυτότητά τους, ενημερώνεται η σειρά
+    * διαθέσιμα προϊόντα που δεν υπάρχουν πια (σβήστηκαν/άλλαξαν online) -> 'removed'
+    * προϊόντα σε μεταφορά/μεταφερμένα δεν πειράζονται
+    Μετά ξαναελέγχονται τα barcode της ενεργής λίστας που ήταν «δεν βρέθηκε»/αμφίσημα ή έδειχναν σε
+    προϊόν που αφαιρέθηκε. Τα barcode ταιριάζουν ΑΚΡΙΒΩΣ (PG0123 και PG123 είναι διαφορετικά).
+    """
+    pool: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for r in conn.execute("SELECT id, barcode_norm, fingerprint, sheet_row, status FROM product_records "
+                          "WHERE import_id=? AND status<>'removed' ORDER BY sheet_row", (import_id,)).fetchall():
+        pool.setdefault((r["barcode_norm"], r["fingerprint"]), []).append(dict(r))
+    new: list[Any] = []
+    moves: list[tuple[int, int]] = []
+    for p in products:
+        candidates = pool.get((p.barcode_norm, p.fingerprint))
+        if not candidates:
+            new.append(p)
+            continue
+        rec = next((r for r in candidates if r["sheet_row"] == p.sheet_row), candidates[0])
+        candidates.remove(rec)
+        if rec["status"] == "available" and rec["sheet_row"] != p.sheet_row:
+            moves.append((p.sheet_row, rec["id"]))
+    gone = [r["id"] for lst in pool.values() for r in lst if r["status"] == "available"]
+    if moves:
+        conn.executemany("UPDATE product_records SET sheet_row=? WHERE id=?", moves)
+    for i in range(0, len(gone), 500):
+        chunk = gone[i:i + 500]
+        conn.execute(f"UPDATE product_records SET status='removed' WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+    _insert_products(conn, import_id, new)
+
+    # ξανά έλεγχος της ενεργής λίστας
+    rechecked = found = 0
+    gone_set = set(gone)
+    for it in conn.execute("SELECT id, barcode_norm, state, product_record_id FROM active_items "
+                           "WHERE status='active'").fetchall():
+        if it["state"] == "ok" and it["product_record_id"] not in gone_set:
+            continue
+        matches = lookup(conn, import_id, it["barcode_norm"])
+        state = "ok" if len(matches) == 1 else ("ambiguous" if matches else "unknown")
+        pid = matches[0]["id"] if len(matches) == 1 else None
+        if state != it["state"] or pid != it["product_record_id"]:
+            conn.execute("UPDATE active_items SET state=?, product_record_id=?, import_id=? WHERE id=?",
+                         (state, pid, import_id, it["id"]))
+            rechecked += 1
+            found += state == "ok"
+    conn.execute("UPDATE excel_imports SET product_count=(SELECT COUNT(*) FROM product_records WHERE import_id=? "
+                 "AND status<>'removed') WHERE id=?", (import_id, import_id))
+    return {"added": len(new), "moved": len(moves), "removed": len(gone), "rechecked": rechecked, "found": found}
 
 
 def _remap_active_items(conn: Conn, import_id: int) -> dict[str, int]:
@@ -259,7 +326,7 @@ def search_products(term: str, limit: int = 50) -> list[dict[str, Any]]:
             return []
         like = f"%{term.strip()}%"
         rows = conn.execute(
-            """SELECT * FROM product_records WHERE import_id=? AND
+            """SELECT * FROM product_records WHERE import_id=? AND status<>'removed' AND
                    (barcode LIKE ? OR eidos LIKE ? OR pelatis LIKE ?) ORDER BY sheet_row LIMIT ?""",
             (imp["id"], like, like, like, limit),
         ).fetchall()

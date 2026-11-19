@@ -465,6 +465,9 @@ def sync_now(actor: str) -> dict[str, Any]:
     out = process_pending(actor, wait=60)
     synced, warning = _onedrive_mirror(actor)
     out.update(onedrive_synced=synced, onedrive_warning=warning)
+    from app.services import excel_worker
+    pulled = excel_worker.pull_onedrive_changes(actor)   # + νέα προϊόντα από το online Excel
+    out["catalog"] = (pulled or {}).get("catalog")
     return out
 
 
@@ -478,8 +481,9 @@ def sync_status(conn: Conn | None = None) -> dict[str, Any]:
             "SELECT id, kind, barcode, error, finished_at FROM transfer_operations WHERE status='failed' "
             "AND finished_at >= ? ORDER BY id DESC LIMIT 20", (since,)).fetchall()]
         settings = {r["key"]: r["value"] for r in c.execute(
-            "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?)",
-            (SYNC_OK_KEY, SYNC_ERR_KEY, "onedrive.last_error")).fetchall()}
+            "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?, ?, ?)",
+            (SYNC_OK_KEY, SYNC_ERR_KEY, "onedrive.last_error", "onedrive.pulled_at",
+             "onedrive.pull_error")).fetchall()}
         imp = c.execute("SELECT id, working_version FROM excel_imports WHERE is_active=1").fetchone()
         return {
             "pending": int(pend["n"]), "oldest_pending": pend["oldest"], "failed_24h": failed,
@@ -488,6 +492,10 @@ def sync_status(conn: Conn | None = None) -> dict[str, Any]:
             "excel_version": int(imp["working_version"]) if imp else None,
             "onedrive_last_error": (json.loads(settings["onedrive.last_error"])
                                     if "onedrive.last_error" in settings else None),
+            "onedrive_pulled_at": (json.loads(settings["onedrive.pulled_at"])
+                                   if "onedrive.pulled_at" in settings else None),
+            "onedrive_pull_error": (json.loads(settings["onedrive.pull_error"])
+                                    if "onedrive.pull_error" in settings else None),
         }
 
     if conn is not None:

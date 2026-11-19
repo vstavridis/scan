@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS product_records (
     extra_json    TEXT,
     fingerprint   TEXT    NOT NULL,
     group_key     TEXT    NOT NULL,
-    status        TEXT    NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'transferred')),
+    status        TEXT    NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'transferred', 'removed')),
     transferred_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_products_lookup ON product_records(import_id, barcode_norm);

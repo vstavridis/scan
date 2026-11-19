@@ -19,12 +19,14 @@ log = logging.getLogger(__name__)
 IDLE_SECONDS = 5.0
 ONEDRIVE_RETRY_SECONDS = 60.0      # πρώτη αυτόματη επανάληψη OneDrive
 ONEDRIVE_MAX_RETRY_SECONDS = 600.0 # μετά από συνεχόμενες αποτυχίες: έως κάθε 10 λεπτά
+ONEDRIVE_PULL_SECONDS = 60.0       # έλεγχος για αλλαγές στο online Excel (π.χ. νέα προϊόντα)
 
 _event = threading.Event()
 _thread: threading.Thread | None = None
 _start_lock = threading.Lock()
 _last_onedrive = 0.0
 _onedrive_delay = ONEDRIVE_RETRY_SECONDS
+_last_pull = 0.0
 _stop = threading.Event()
 
 
@@ -61,7 +63,7 @@ def stop(timeout: float = 10.0) -> None:
 
 def run_once() -> dict:
     """Ένας γύρος: ουρά Excel και (αν χρειάζεται) OneDrive. Χρησιμοποιείται και από τα tests."""
-    global _last_onedrive, _onedrive_delay
+    global _last_onedrive, _onedrive_delay, _last_pull
     from app.services import transfer
     from app.services.errors import Conflict, ServiceError
 
@@ -91,7 +93,35 @@ def run_once() -> dict:
                                else min(_onedrive_delay * 2, ONEDRIVE_MAX_RETRY_SECONDS))
     except Exception as exc:  # το OneDrive δεν σταματά ποτέ τον worker
         log.warning("OneDrive mirror check failed (%s)", type(exc).__name__)
+    # Αλλαγές που έγιναν απευθείας στο online Excel (π.χ. νέα προϊόντα) -> στον κατάλογο
+    if time.monotonic() - _last_pull > ONEDRIVE_PULL_SECONDS:
+        _last_pull = time.monotonic()
+        out["pulled"] = pull_onedrive_changes("onedrive-pull")
     return out
+
+
+def pull_onedrive_changes(actor: str) -> dict | None:
+    """Ανάγνωση αλλαγών του online Excel· τα σφάλματα καταγράφονται, ποτέ δεν σταματούν την αποθήκη."""
+    from app.services import onedrive, onedrive_outbox
+    from app.services.errors import Conflict, ServiceError
+    try:
+        if not onedrive.status().get("bound"):
+            return None
+        return onedrive_outbox.pull(actor)
+    except Conflict:
+        return None   # άλλη ενέργεια Excel σε εξέλιξη: στον επόμενο γύρο
+    except Exception as exc:
+        reason = exc.message if isinstance(exc, ServiceError) else type(exc).__name__
+        log.warning("OneDrive pull failed (%s)", type(exc).__name__)
+        try:
+            from app.db.database import transaction
+            from app.timeutil import utcnow_iso
+            with transaction() as db:
+                onedrive_outbox._set(db, onedrive_outbox.PULL_ERROR_KEY,
+                                     {"at": utcnow_iso(), "error": str(reason)[:500]})
+        except Exception:
+            pass
+        return None
 
 
 def _loop() -> None:
